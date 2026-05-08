@@ -58,7 +58,7 @@ class TranslationCacheTests(unittest.TestCase):
         self.assertNotEqual(base.cache_key, glossary_changed.cache_key)
         self.assertNotEqual(base.cache_key, context_changed.cache_key)
 
-    def test_no_api_key_appears_in_sqlite_content(self):
+    def test_no_api_key_column_exists_in_sqlite_schema(self):
         secret_api_key = "sk-secret-value-that-must-not-be-stored"
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_path = Path(temp_dir) / "cache.sqlite3"
@@ -69,14 +69,17 @@ class TranslationCacheTests(unittest.TestCase):
 
             connection = sqlite3.connect(cache_path)
             try:
+                schema_rows = connection.execute("PRAGMA table_info(translation_cache)").fetchall()
                 content_rows = connection.execute(
                     "SELECT cache_key, provider, model, target_lang, prompt_version, "
                     "glossary_hash, context_hash, batch_source_hash, result_json FROM translation_cache"
                 ).fetchall()
             finally:
                 connection.close()
+            column_names = [str(row[1]) for row in schema_rows]
             raw_bytes = cache_path.read_bytes()
 
+        self.assertNotIn("api_key", column_names)
         self.assertNotIn(secret_api_key, str(content_rows))
         self.assertNotIn(secret_api_key.encode("utf-8"), raw_bytes)
 

@@ -6,8 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from translation.config import TranslationConfig
-from translation.models import Cue
-from translation.pipeline import parse_translation_response, run_translation_pipeline
+from translation.models import Cue, TranslationBatch
+from translation.pipeline import _build_batch_source_hash, parse_translation_response, run_translation_pipeline
+from translation.prompts import build_translation_prompt
 
 
 ONE_CUE = [Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")]
@@ -146,6 +147,29 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("cache_hits: 1", report)
         self.assertIn("provider_calls: 0", report)
         self.assertIn("cache_misses: 0", report)
+
+    def test_batch_source_hash_changes_when_prompt_context_changes(self):
+        current_cue = Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")
+        context_cue = Cue(id="2", index=2, start="00:00:02,000", end="00:00:03,000", source="world")
+        without_context = TranslationBatch(
+            batch_id=1,
+            cues=(current_cue,),
+            context_before=(),
+            context_after=(),
+        )
+        with_context = TranslationBatch(
+            batch_id=1,
+            cues=(current_cue,),
+            context_before=(),
+            context_after=(context_cue,),
+        )
+        prompt_without_context = build_translation_prompt(without_context, "zh-CN")
+        prompt_with_context = build_translation_prompt(with_context, "zh-CN")
+
+        self.assertNotEqual(
+            _build_batch_source_hash(prompt_without_context),
+            _build_batch_source_hash(prompt_with_context),
+        )
 
     def test_cache_disabled_calls_provider_every_run(self):
         class FakeProvider:
@@ -312,7 +336,11 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             with patch("translation.pipeline.OpenAICompatibleProvider", FlakyProvider):
                 run_translation_pipeline(subtitle_path, config)
 
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
         self.assertEqual(FlakyProvider.attempts, 2)
+        self.assertIn("provider_calls: 2", report)
+        self.assertIn("retries: 1", report)
 
     def test_final_batch_failure_reports_batch_id_and_attempt_count(self):
         class BrokenProvider:
@@ -336,6 +364,34 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider):
                 with self.assertRaisesRegex(RuntimeError, r"(?s)batch_id 1.*2 attempts.*not valid JSON"):
                     run_translation_pipeline(subtitle_path, config)
+
+    def test_provider_failure_writes_no_context_report_or_srt_outputs(self):
+        class BrokenProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return "not json"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = _write_two_cue_srt(Path(temp_dir))
+            output_dir = Path(temp_dir) / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                max_retries=1,
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider):
+                with self.assertRaisesRegex(RuntimeError, r"(?s)batch_id 1.*2 attempts.*not valid JSON"):
+                    run_translation_pipeline(subtitle_path, config)
+
+            self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+            self.assertFalse((output_dir / "bilingual.srt").exists())
+            self.assertFalse((output_dir / "global_context.md").exists())
+            self.assertFalse((output_dir / "translation_report.md").exists())
 
     def test_existing_translated_or_bilingual_outputs_require_overwrite_before_provider_call(self):
         class FailingProvider:

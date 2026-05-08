@@ -51,7 +51,6 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     glossary = load_glossary(config.glossary_path)
     global_context = build_global_context(cues, input_path, config)
-    write_global_context(global_context, output_paths.global_context)
 
     batches = create_batches(cues, config.batch_size, config.context_before, config.context_after)
     stats = TranslationStats(total_batches=len(batches))
@@ -67,7 +66,7 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
                 glossary.text,
                 global_context.text,
             )
-            batch_source_hash = _build_batch_source_hash(batch)
+            batch_source_hash = _build_batch_source_hash(prompt)
             cache_key = build_batch_cache_key(
                 config.provider,
                 config.model,
@@ -115,6 +114,7 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     validate_translations(cues, all_translations)
     write_translated_srt(cues, all_translations, output_paths.translated_srt)
     write_bilingual_srt(cues, all_translations, output_paths.bilingual_srt)
+    write_global_context(global_context, output_paths.global_context)
 
     result = PipelineResult(
         input_path=input_path,
@@ -190,33 +190,21 @@ def _translate_batch_with_retries(
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
+            stats.provider_calls += 1
             response_text = provider.translate_batch(prompt)
             translations = parse_translation_response(response_text, batch.cues, batch.batch_id)
-            stats.provider_calls += 1
             stats.retries += attempt - 1
             return response_text, translations
         except (RuntimeError, ValueError) as exc:
             last_error = exc
-    stats.provider_calls += attempts
     stats.retries += max(attempts - 1, 0)
     stats.failed_batches += 1
     detail = f": {last_error}" if last_error is not None else ""
     raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
 
 
-def _build_batch_source_hash(batch: TranslationBatch) -> str:
-    payload = [
-        {
-            "end": cue.end,
-            "id": cue.id,
-            "index": cue.index,
-            "source": cue.source,
-            "start": cue.start,
-        }
-        for cue in batch.cues
-    ]
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _build_batch_source_hash(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def _attempt_count(config: TranslationConfig) -> int:
