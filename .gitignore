@@ -16,6 +16,7 @@ build/
 .env
 .env.local
 .env.*.local
+.translation_cache*
 
 # IDE
 .vscode/
