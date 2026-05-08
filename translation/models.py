@@ -22,6 +22,14 @@ class TranslatedCue:
 
 
 @dataclass(frozen=True)
+class TranslationBatch:
+    batch_id: int
+    cues: tuple[Cue, ...]
+    context_before: tuple[Cue, ...]
+    context_after: tuple[Cue, ...]
+
+
+@dataclass(frozen=True)
 class TranslationOutputPaths:
     output_dir: Path
     translated_srt: Path

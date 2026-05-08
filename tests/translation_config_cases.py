@@ -172,7 +172,7 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertEqual(result.first_cue_preview, "你好 world")
 
-    def test_non_dry_run_remains_unimplemented_after_parser_validation(self):
+    def test_non_dry_run_requires_api_key_after_parser_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             subtitle_path = Path(temp_dir) / "sample.srt"
             subtitle_path.write_text(
@@ -180,7 +180,7 @@ class TranslationConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(NotImplementedError, "provider execution is not implemented"):
+            with self.assertRaisesRegex(ValueError, "TRANSLATION_API_KEY"):
                 run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=False))
 
 
