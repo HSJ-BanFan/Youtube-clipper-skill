@@ -16,6 +16,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            timeout=30,
         )
 
         self.assertEqual(result.returncode, 0)
@@ -32,6 +33,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            timeout=30,
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -71,6 +73,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
 
         self.assertEqual(result.returncode, 0)
@@ -105,6 +108,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
 
         self.assertNotEqual(result.returncode, 0)
@@ -135,6 +139,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
+                timeout=30,
             )
 
         self.assertEqual(result.returncode, 0)

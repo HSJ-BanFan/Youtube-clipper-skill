@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from translation.config import TranslationConfig, load_config
+from translation.pipeline import run_translation_pipeline
 
 
 class TranslationConfigTests(unittest.TestCase):
@@ -76,6 +77,56 @@ class TranslationConfigTests(unittest.TestCase):
         self.assertNotIn("api_key", safe)
         self.assertNotIn("env-secret", str(safe))
         self.assertNotIn("env-secret", repr(config))
+
+    def test_system_environment_values_override_env_file_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("TRANSLATION_MODEL=file-model\n", encoding="utf-8")
+
+            config = load_config(
+                cli_args={},
+                env_path=env_path,
+                environ={"TRANSLATION_MODEL": "system-model"},
+            )
+
+        self.assertEqual(config.model, "system-model")
+
+    def test_safe_config_redacts_credentials_when_password_contains_at_symbol(self):
+        config = TranslationConfig(base_url="https://user:p@ssword@example.test/v1")
+
+        safe = config.to_safe_dict()
+
+        self.assertEqual(safe["base_url"], "https://<redacted>@example.test/v1")
+        self.assertNotIn("p@ssword", str(safe))
+
+    def test_invalid_env_numeric_value_names_environment_variable(self):
+        with self.assertRaisesRegex(ValueError, "TRANSLATION_BATCH_SIZE"):
+            load_config(
+                cli_args={},
+                env_path=None,
+                environ={"TRANSLATION_BATCH_SIZE": "abc"},
+            )
+
+    def test_invalid_mode_raises_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "mode must be one of"):
+            TranslationConfig(mode="invalid")
+
+    def test_srt_cue_count_ignores_digit_only_text_lines(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:01,000\n"
+                "42\n\n"
+                "2\n"
+                "00:00:02.000 --> 00:00:03.000\n"
+                "done\n\n",
+                encoding="utf-8",
+            )
+
+            result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
+
+        self.assertEqual(result.cue_count, 2)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+VALID_MODES = {"fast", "balanced", "publish"}
+
+
 ENV_MAPPING = {
     "provider": "TRANSLATION_PROVIDER",
     "base_url": "TRANSLATION_BASE_URL",
@@ -51,6 +54,10 @@ class TranslationConfig:
     def __post_init__(self) -> None:
         if self.provider != "openai-compatible":
             raise ValueError("only openai-compatible is supported in B1-lite")
+        object.__setattr__(self, "mode", self.mode.strip().lower())
+        if self.mode not in VALID_MODES:
+            valid_modes = ", ".join(sorted(VALID_MODES))
+            raise ValueError(f"mode must be one of: {valid_modes}")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         if self.context_before < 0:
@@ -99,7 +106,8 @@ def load_config(
 ) -> TranslationConfig:
     env = dict(os.environ if environ is None else environ)
     if env_path is not None:
-        env.update(_load_env_file(Path(env_path)))
+        for key, value in _load_env_file(Path(env_path)).items():
+            env.setdefault(key, value)
 
     values: dict[str, Any] = {}
     for field_name, env_name in ENV_MAPPING.items():
@@ -142,12 +150,16 @@ def _parse_env_file(env_path: Path) -> dict[str, str]:
 
 
 def _coerce_value(field_name: str, raw_value: str) -> Any:
-    if field_name in {"batch_size", "context_before", "context_after", "max_retries"}:
-        return int(raw_value)
-    if field_name == "temperature":
-        return float(raw_value)
-    if field_name == "cache_enabled":
-        return _parse_bool(raw_value)
+    try:
+        if field_name in {"batch_size", "context_before", "context_after", "max_retries"}:
+            return int(raw_value)
+        if field_name == "temperature":
+            return float(raw_value)
+        if field_name == "cache_enabled":
+            return _parse_bool(raw_value)
+    except ValueError as exc:
+        env_name = ENV_MAPPING.get(field_name, field_name)
+        raise ValueError(f"invalid value for {env_name}: {raw_value!r}") from exc
     return raw_value
 
 
@@ -164,5 +176,5 @@ def _redact_url(url: str) -> str:
     if "@" not in url:
         return url
     scheme, rest = url.split("://", 1) if "://" in url else ("", url)
-    host = rest.split("@", 1)[1]
+    host = rest.rsplit("@", 1)[1]
     return f"{scheme}://<redacted>@{host}" if scheme else f"<redacted>@{host}"

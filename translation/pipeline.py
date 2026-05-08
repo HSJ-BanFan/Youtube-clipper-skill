@@ -68,5 +68,10 @@ def _detect_input_format(input_path: Path) -> str:
 def _count_cues(input_path: Path, input_format: str) -> int:
     content = input_path.read_text(encoding="utf-8-sig")
     if input_format == "srt":
-        return len(re.findall(r"(?m)^\d+\s*$", content))
+        return len(
+            re.findall(
+                r"(?m)^\s*\d+\s*\r?\n\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}",
+                content,
+            )
+        )
     return content.count("-->")
