@@ -90,6 +90,7 @@ All implementation code lives under `scripts/`.
 
 ## Repo-specific notes
 
+- This repository is developed from the `HSJ-BanFan/Youtube-clipper-skill` fork. Development PRs should target the fork's `main` branch, not the upstream `op7418/Youtube-clipper-skill`, unless the user explicitly asks for an upstream PR.
 - Repository now has focused unittest coverage for translation V2 config and CLI behavior. Other script changes still need smoke checks and dependency verification.
 - Subtitle burning depends on FFmpeg subtitle filter support. If `ffmpeg -filters` does not show `subtitles`, hard-subtitle flow is broken.
 - This repo is designed first as script-backed skill, not long-running service or web app. Keep changes aligned with CLI/script workflow.
