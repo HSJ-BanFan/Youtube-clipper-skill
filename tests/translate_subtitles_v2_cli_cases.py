@@ -166,16 +166,27 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertIn("output_format: srt", result.stdout)
         self.assertIn("cue_count: 1", result.stdout)
 
-    def test_non_dry_run_fails_with_clear_unimplemented_message(self):
+    def test_non_dry_run_without_api_key_fails_before_network_call(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             subtitle_path = Path(temp_dir) / "sample.srt"
             subtitle_path.write_text(
                 "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
                 encoding="utf-8",
             )
+            output_dir = Path(temp_dir) / "out"
+            empty_env = Path(temp_dir) / ".env"
+            empty_env.write_text("", encoding="utf-8")
 
             result = subprocess.run(
-                [sys.executable, str(SCRIPT), str(subtitle_path)],
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(subtitle_path),
+                    "--env-file",
+                    str(empty_env),
+                    "--output-dir",
+                    str(output_dir),
+                ],
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,
@@ -183,7 +194,12 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Translation provider execution is not implemented", result.stderr)
+        self.assertIn(
+            "TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.",
+            result.stderr,
+        )
+        self.assertNotIn("--api-key", result.stderr)
+        self.assertNotIn("Authorization", result.stderr)
 
 
 if __name__ == "__main__":

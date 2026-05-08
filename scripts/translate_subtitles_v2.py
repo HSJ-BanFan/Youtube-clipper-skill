@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(cli_args=cli_args, env_path=args.env_file)
         result = run_translation_pipeline(args.subtitle_path, config)
-    except (FileExistsError, FileNotFoundError, NotImplementedError, ValueError) as exc:
+    except (FileExistsError, FileNotFoundError, NotImplementedError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
