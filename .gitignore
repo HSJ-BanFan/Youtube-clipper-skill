@@ -16,6 +16,10 @@ build/
 .env
 .env.local
 .env.*.local
+.translation_cache*
+
+# Local agent state
+.omc/
 
 # IDE
 .vscode/
