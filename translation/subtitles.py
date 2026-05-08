@@ -6,9 +6,10 @@ from pathlib import Path
 
 from translation.models import Cue
 
+_TIMESTAMP_RE = r"(?:\d{2}:)?\d{2}:\d{2}[,.]\d{3}"
 _TIMING_RE = re.compile(
-    r"^(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s+-->\s+"
-    r"(?P<end>\d{2}:\d{2}:\d{2}[,.]\d{3})(?P<settings>.*)$"
+    rf"^(?P<start>{_TIMESTAMP_RE})\s+-->\s+"
+    rf"(?P<end>{_TIMESTAMP_RE})(?P<settings>.*)$"
 )
 _SKIP_VTT_BLOCK_PREFIXES = ("NOTE", "STYLE", "REGION")
 
@@ -106,8 +107,10 @@ def _parse_blocks(content: str, is_vtt: bool) -> list[Cue]:
         if is_vtt and _is_skipped_vtt_block(block):
             continue
         cue = _parse_block(block, index=len(cues) + 1, is_vtt=is_vtt)
-        if cue is not None:
-            cues.append(cue)
+        if cue is None:
+            snippet = _format_block_snippet(block)
+            raise ValueError(f"invalid subtitle cue block near cue index {len(cues) + 1}: {snippet}")
+        cues.append(cue)
     return cues
 
 
@@ -129,6 +132,10 @@ def _split_blocks(content: str) -> list[list[str]]:
 
 def _normalize_lines(content: str) -> list[str]:
     return content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _format_block_snippet(block: list[str]) -> str:
+    return " | ".join(line.strip() for line in block[:3])
 
 
 def _is_skipped_vtt_block(block: list[str]) -> bool:
@@ -180,7 +187,10 @@ def _cue_id_for_block(block: list[str], timing_line_index: int, index: int, is_v
 
 
 def _normalize_timestamp(value: str) -> str:
-    return value.replace(".", ",")
+    normalized = value.replace(".", ",")
+    if normalized.count(":") == 1:
+        return f"00:{normalized}"
+    return normalized
 
 
 def _write_srt_blocks(cues: list[Cue], path: Path, text_for: Callable[[Cue], str]) -> None:

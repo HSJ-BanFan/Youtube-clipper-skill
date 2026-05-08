@@ -103,6 +103,19 @@ class SubtitleParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source is empty"):
             parse_srt("1\n00:00:00,000 --> 00:00:01,000\n\n")
 
+    def test_parse_srt_rejects_malformed_block_instead_of_skipping_it(self):
+        with self.assertRaisesRegex(ValueError, "invalid subtitle cue block near cue index 1: not a valid cue"):
+            parse_srt(
+                "not a valid cue\nmissing timing\n\n"
+                "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
+            )
+
+    def test_parse_srt_accepts_hourless_timestamps(self):
+        cues = parse_srt("1\n01:23,456 --> 01:25,000\nhello\n\n")
+
+        self.assertEqual(cues[0].start, "00:01:23,456")
+        self.assertEqual(cues[0].end, "00:01:25,000")
+
     def test_parse_vtt_with_header_and_ordinary_cue(self):
         cues = parse_vtt("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n\n")
 
@@ -127,6 +140,20 @@ class SubtitleParserTests(unittest.TestCase):
         self.assertEqual(cues[0].raw_timing, "00:00:00.000 --> 00:00:01.000 align:start position:0%")
         self.assertEqual(cues[0].start, "00:00:00,000")
         self.assertEqual(cues[0].end, "00:00:01,000")
+
+    def test_parse_vtt_accepts_hourless_timestamps(self):
+        cues = parse_vtt("WEBVTT\n\n01:23.456 --> 01:25.000\nhello\n\n")
+
+        self.assertEqual(cues[0].start, "00:01:23,456")
+        self.assertEqual(cues[0].end, "00:01:25,000")
+
+    def test_parse_vtt_rejects_malformed_cue_block_instead_of_skipping_it(self):
+        with self.assertRaisesRegex(ValueError, "invalid subtitle cue block near cue index 1: bad cue"):
+            parse_vtt(
+                "WEBVTT\n\n"
+                "bad cue\nmissing timing\n\n"
+                "00:00:00.000 --> 00:00:01.000\nhello\n\n"
+            )
 
     def test_parse_vtt_skips_note_style_and_region_blocks(self):
         cues = parse_vtt(

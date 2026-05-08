@@ -68,7 +68,7 @@ This installs repository into `~/.claude/skills/youtube-clipper/` for end-user s
 
 ### Processing pipeline
 
-All implementation code lives under `scripts/`.
+Legacy skill implementation lives under `scripts/`. Translation V2 implementation is allowed under `translation/` as the B1-lite engine package.
 
 - `download_video.py` downloads source video and subtitles with `yt-dlp`.
 - `analyze_subtitles.py` parses VTT subtitles and prepares structured data for Claude chapter analysis.
@@ -79,6 +79,8 @@ All implementation code lives under `scripts/`.
 - `burn_subtitles.py` burns subtitles into video and handles FFmpeg/libass detection.
 - `generate_summary.py` creates shareable summary copy for clips.
 - `utils.py` holds shared helpers for time conversion, filename sanitization, path creation, and formatting.
+- `translate_subtitles_v2.py` must stay thin CLI glue for config loading, pipeline invocation, and user-facing output.
+- `translation/` owns reusable Translation V2 parser, provider, pipeline, cache, QA, and report modules.
 
 ### External dependencies
 
