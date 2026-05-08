@@ -5,6 +5,23 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class Cue:
+    id: str
+    index: int
+    start: str
+    end: str
+    source: str
+    raw_timing: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class TranslatedCue:
+    cue: Cue
+    translation: str
+
+
+@dataclass(frozen=True)
 class TranslationOutputPaths:
     output_dir: Path
     translated_srt: Path
@@ -22,3 +39,5 @@ class PipelineResult:
     dry_run: bool
     cue_count: int
     provider_called: bool = False
+    first_cue_preview: str | None = None
+    last_cue_preview: str | None = None

@@ -128,6 +128,61 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertEqual(result.cue_count, 2)
 
+    def test_dry_run_uses_parser_and_returns_cue_previews(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:01,000\n"
+                "hello\nworld\n\n"
+                "2\n"
+                "00:00:02,000 --> 00:00:03,000\n"
+                "done\n\n",
+                encoding="utf-8",
+            )
+
+            result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
+
+        self.assertEqual(result.cue_count, 2)
+        self.assertEqual(result.first_cue_preview, "hello world")
+        self.assertEqual(result.last_cue_preview, "done")
+
+    def test_dry_run_preview_escapes_terminal_control_characters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello \x1b[2J world\n\n",
+                encoding="utf-8",
+            )
+
+            result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
+
+        self.assertNotIn("\x1b", result.first_cue_preview)
+        self.assertEqual(result.first_cue_preview, "hello [2J world")
+
+    def test_dry_run_preview_preserves_unicode_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n你好 world\n\n",
+                encoding="utf-8",
+            )
+
+            result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
+
+        self.assertEqual(result.first_cue_preview, "你好 world")
+
+    def test_non_dry_run_remains_unimplemented_after_parser_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(NotImplementedError, "provider execution is not implemented"):
+                run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=False))
+
 
 if __name__ == "__main__":
     unittest.main()

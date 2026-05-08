@@ -80,6 +80,10 @@ def _print_report_summary(result: PipelineResult, safe_config: dict[str, object]
     print(f"input_format: {result.input_format}")
     print(f"output_format: {result.output_format}")
     print(f"cue_count: {result.cue_count}")
+    if result.first_cue_preview is not None:
+        print(f"first_cue_preview: {result.first_cue_preview}")
+    if result.last_cue_preview is not None:
+        print(f"last_cue_preview: {result.last_cue_preview}")
     print("config:")
     for key, value in safe_config.items():
         print(f"  {key}: {value}")
