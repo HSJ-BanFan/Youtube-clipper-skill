@@ -57,6 +57,9 @@ class TranslationConfig:
         if self.provider != "openai-compatible":
             raise ValueError("only openai-compatible is supported in B1-lite")
         object.__setattr__(self, "mode", self.mode.strip().lower())
+        object.__setattr__(self, "qa_mode", self.qa_mode.strip().lower())
+        if self.qa_mode == "off":
+            object.__setattr__(self, "qa_mode", "none")
         if self.mode not in VALID_MODES:
             valid_modes = ", ".join(sorted(VALID_MODES))
             raise ValueError(f"mode must be one of: {valid_modes}")
@@ -73,7 +76,7 @@ class TranslationConfig:
         if self.max_retries < 0:
             raise ValueError("max_retries must be greater than or equal to 0")
         if self.qa_mode not in {"suspicious-only", "none"}:
-            raise ValueError("qa_mode must be suspicious-only or none")
+            raise ValueError("qa_mode must be suspicious-only, none, or off (alias for none)")
 
     @property
     def effective_review_model(self) -> str:

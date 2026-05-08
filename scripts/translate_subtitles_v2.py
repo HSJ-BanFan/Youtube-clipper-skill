@@ -30,7 +30,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, help="Model temperature")
     parser.add_argument("--max-retries", dest="max_retries", type=int, help="Maximum retries per batch")
     parser.add_argument("--cache-path", dest="cache_path", help="SQLite cache path")
-    parser.add_argument("--qa", dest="qa_mode", choices=["suspicious-only", "none"], help="QA mode")
+    parser.add_argument("--qa", dest="qa_mode", choices=["suspicious-only", "none", "off"], help="QA mode")
     parser.add_argument("--no-cache", dest="cache_enabled", action="store_false", default=None, help="Disable cache")
     parser.add_argument("--no-qa", dest="qa_mode", action="store_const", const="none", help="Disable QA")
     parser.add_argument("--dry-run", action="store_true", help="Print resolved config and output paths only")

@@ -131,11 +131,77 @@ class TranslationProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"choices\[0\]\.message\.content"):
                 provider.translate_batch("prompt")
 
-    def test_review_suspicious_remains_deferred_to_pr4(self):
+    def test_review_suspicious_uses_review_model(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout=30):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                200,
+                json.dumps({"choices": [{"message": {"content": "reviewed"}}]}).encode("utf-8"),
+            )
+
+        config = TranslationConfig(
+            api_key="test-secret",
+            model="translator-model",
+            review_model="reviewer-model",
+        )
+        provider = OpenAICompatibleProvider(config)
+
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            result = provider.review_suspicious("review this")
+
+        self.assertEqual(result, "reviewed")
+        self.assertEqual(captured["body"]["model"], "reviewer-model")
+        self.assertEqual(captured["body"]["messages"], [{"role": "user", "content": "review this"}])
+
+    def test_review_suspicious_reuses_translation_model_when_review_model_empty(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout=30):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                200,
+                json.dumps({"choices": [{"message": {"content": "reviewed"}}]}).encode("utf-8"),
+            )
+
+        provider = OpenAICompatibleProvider(
+            TranslationConfig(api_key="test-secret", model="translator-model", review_model=None)
+        )
+
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            provider.review_suspicious("review this")
+
+        self.assertEqual(captured["body"]["model"], "translator-model")
+
+    def test_review_suspicious_errors_do_not_leak_api_key_or_authorization(self):
+        def fake_urlopen(request, timeout=30):
+            raise HTTPError(
+                request.full_url,
+                502,
+                "bad gateway",
+                hdrs=None,
+                fp=BytesIO(b'{"error":"test-secret Authorization"}'),
+            )
+
         provider = OpenAICompatibleProvider(TranslationConfig(api_key="test-secret"))
 
-        with self.assertRaisesRegex(NotImplementedError, "PR4"):
-            provider.review_suspicious("prompt")
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 502") as error:
+                provider.review_suspicious("prompt")
+
+        self.assertNotIn("test-secret", str(error.exception))
+        self.assertNotIn("Authorization", str(error.exception))
+
+    def test_review_suspicious_rejects_missing_message_content(self):
+        def fake_urlopen(request, timeout=30):
+            return FakeResponse(200, json.dumps({"choices": [{}]}).encode("utf-8"))
+
+        provider = OpenAICompatibleProvider(TranslationConfig(api_key="test-secret"))
+
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(RuntimeError, r"choices\[0\]\.message\.content"):
+                provider.review_suspicious("prompt")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from translation.config import TranslationConfig
 from translation.models import Cue, TranslationBatch
-from translation.pipeline import _build_batch_source_hash, parse_translation_response, run_translation_pipeline
+from translation.pipeline import (
+    _build_batch_source_hash,
+    parse_qa_response,
+    parse_translation_response,
+    run_translation_pipeline,
+)
 from translation.prompts import build_translation_prompt
 
 
@@ -40,6 +45,51 @@ class TranslationResponseParserTests(unittest.TestCase):
     def test_parse_translation_response_rejects_empty_translation(self):
         with self.assertRaisesRegex(ValueError, "cue id 1"):
             parse_translation_response('[{"id":"1","translation":"  "}]', ONE_CUE, batch_id=7)
+
+
+class QAResponseParserTests(unittest.TestCase):
+    def test_parse_qa_response_applies_fix_and_ignores_keep(self):
+        candidates = [
+            Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello"),
+            Cue(id="2", index=2, start="00:00:02,000", end="00:00:03,000", source="world"),
+        ]
+        response = json.dumps(
+            [
+                {"id": "1", "action": "fix", "translation": "你好", "reason": "empty"},
+                {"id": "2", "action": "keep", "translation": "world", "reason": "ok"},
+            ]
+        )
+
+        fixes = parse_qa_response(response, candidates)
+
+        self.assertEqual(fixes, {"1": "你好"})
+
+    def test_parse_qa_response_accepts_fenced_json(self):
+        candidates = [Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")]
+
+        fixes = parse_qa_response('```json\n[{"id":"1","action":"fix","translation":"你好","reason":"empty"}]\n```', candidates)
+
+        self.assertEqual(fixes, {"1": "你好"})
+
+    def test_parse_qa_response_rejects_natural_language_wrapper(self):
+        candidates = [Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")]
+
+        with self.assertRaisesRegex(RuntimeError, "QA response is not valid JSON"):
+            parse_qa_response('Here is JSON:\n[{"id":"1","action":"fix","translation":"你好","reason":"empty"}]', candidates)
+
+    def test_parse_qa_response_requires_matching_ids_actions_and_non_empty_translation(self):
+        candidates = [Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")]
+
+        bad_responses = [
+            '[{"id":"2","action":"fix","translation":"你好","reason":"empty"}]',
+            '[{"id":"1","action":"rewrite","translation":"你好","reason":"empty"}]',
+            '[{"id":"1","action":"fix","translation":"  ","reason":"empty"}]',
+        ]
+
+        for response in bad_responses:
+            with self.subTest(response=response):
+                with self.assertRaisesRegex(RuntimeError, "QA response"):
+                    parse_qa_response(response, candidates)
 
 
 class TranslationPipelineExecutionTests(unittest.TestCase):
@@ -393,6 +443,161 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             self.assertFalse((output_dir / "global_context.md").exists())
             self.assertFalse((output_dir / "translation_report.md").exists())
 
+    def test_suspicious_only_without_candidates_does_not_call_review_suspicious(self):
+        class FakeProvider:
+            review_calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "你好"}])
+
+            def review_suspicious(self, prompt):
+                FakeProvider.review_calls += 1
+                raise AssertionError("review_suspicious should not be called")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(FakeProvider.review_calls, 0)
+        self.assertIn("qa_candidates: 0", report)
+        self.assertIn("qa_provider_calls: 0", report)
+
+    def test_suspicious_only_applies_fix_and_keep_to_outputs_and_report(self):
+        class FakeProvider:
+            review_calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps(
+                    [
+                        {"id": "1", "translation": "As an AI, I cannot help."},
+                        {"id": "2", "translation": "world"},
+                    ]
+                )
+
+            def review_suspicious(self, prompt):
+                FakeProvider.review_calls += 1
+                return json.dumps(
+                    [
+                        {"id": "1", "action": "fix", "translation": "你好", "reason": "fixed refusal"},
+                        {"id": "2", "action": "keep", "translation": "world", "reason": "not obvious"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_suspicious_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(FakeProvider.review_calls, 1)
+        self.assertIn("你好", translated)
+        self.assertIn("world", translated)
+        self.assertNotIn("As an AI", translated)
+        self.assertIn("你好\nhello", bilingual)
+        self.assertIn("world\nopen https://example.test/docs and read it", bilingual)
+        self.assertIn("qa_candidates: 2", report)
+        self.assertIn("qa_provider_calls: 1", report)
+        self.assertIn("qa_fixed: 1", report)
+        self.assertIn("qa_kept: 1", report)
+        self.assertNotIn("test-secret", report)
+
+    def test_malformed_qa_json_raises_clear_runtime_error_and_writes_no_outputs(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "As an AI, I cannot help."}])
+
+            def review_suspicious(self, prompt):
+                return "not json"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                with self.assertRaisesRegex(RuntimeError, "QA response is not valid JSON"):
+                    run_translation_pipeline(subtitle_path, config)
+
+            self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+            self.assertFalse((output_dir / "bilingual.srt").exists())
+            self.assertFalse((output_dir / "translation_report.md").exists())
+
+    def test_qa_none_skips_review_suspicious(self):
+        self._assert_qa_disabled_skips_review_suspicious("none")
+
+    def test_qa_off_skips_review_suspicious(self):
+        self._assert_qa_disabled_skips_review_suspicious("off")
+
+    def _assert_qa_disabled_skips_review_suspicious(self, qa_mode):
+        class FakeProvider:
+            review_calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "As an AI, I cannot help."}])
+
+            def review_suspicious(self, prompt):
+                FakeProvider.review_calls += 1
+                raise AssertionError("review_suspicious should not be called")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+                qa_mode=qa_mode,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual(FakeProvider.review_calls, 0)
+
     def test_existing_translated_or_bilingual_outputs_require_overwrite_before_provider_call(self):
         class FailingProvider:
             def __init__(self, config):
@@ -424,6 +629,16 @@ def _write_two_cue_srt(temp_dir: Path) -> Path:
     subtitle_path.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
         "2\n00:00:02,000 --> 00:00:03,000\nworld\n\n",
+        encoding="utf-8",
+    )
+    return subtitle_path
+
+
+def _write_two_suspicious_cue_srt(temp_dir: Path) -> Path:
+    subtitle_path = temp_dir / "sample.srt"
+    subtitle_path.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
+        "2\n00:00:02,000 --> 00:00:03,000\nopen https://example.test/docs and read it\n\n",
         encoding="utf-8",
     )
     return subtitle_path

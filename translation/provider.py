@@ -30,20 +30,24 @@ class OpenAICompatibleProvider(TranslationProvider):
         if not self._config.api_key:
             raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
 
-        response_data = self._post_chat_completion(prompt)
+        response_data = self._post_chat_completion(prompt, self.model)
         return _extract_message_content(response_data)
 
     def review_suspicious(self, prompt: str) -> str:
-        raise NotImplementedError("suspicious review is deferred to PR4")
+        if not self._config.api_key:
+            raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
 
-    def _post_chat_completion(self, prompt: str) -> Any:
+        response_data = self._post_chat_completion(prompt, self.review_model)
+        return _extract_message_content(response_data)
+
+    def _post_chat_completion(self, prompt: str, model: str) -> Any:
         parsed_base_url = urlparse(self.base_url)
         if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
             raise ValueError("base_url must use http:// or https://")
 
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": self.temperature,
         }

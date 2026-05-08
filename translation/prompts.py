@@ -4,9 +4,11 @@ import json
 from collections.abc import Sequence
 
 from translation.models import Cue, TranslationBatch
+from translation.qa import QACandidate
 
 
 PROMPT_VERSION = "translation-v2-json-cue-v1"
+QA_PROMPT_VERSION = "translation-v2-suspicious-qa-v1"
 
 
 def build_translation_prompt(
@@ -43,6 +45,34 @@ def build_translation_prompt(
     )
 
 
+def build_suspicious_qa_prompt(
+    candidates: list[QACandidate],
+    target_lang: str,
+    glossary_text: str = "",
+    global_context_text: str = "",
+) -> str:
+    return "\n".join(
+        [
+            f"Review only suspicious subtitle translations for {target_lang}.",
+            "Only fix obvious errors; otherwise keep the existing translation.",
+            "only return JSON. do not return Markdown or explanations.",
+            "Return a JSON array with exactly one item for each candidate.",
+            "do not add, delete, or reorder ids. id must match exactly.",
+            'Each item shape: {"id": "...", "action": "keep" | "fix", "translation": "...", "reason": "..."}.',
+            "translation must not be empty.",
+            "preserve code, commands, variable names, paths, URLs, and library names.",
+            "Follow the glossary consistently when fixing translations.",
+            "Global context is only for understanding; do not translate global context; do not output global context.",
+            "Glossary:",
+            _format_text_section(glossary_text),
+            "Global Context:",
+            _format_text_section(global_context_text),
+            "Suspicious candidates:",
+            _format_qa_candidates(candidates),
+        ]
+    )
+
+
 def _format_text_section(text: str) -> str:
     stripped = text.strip()
     if not stripped:
@@ -55,6 +85,30 @@ def _format_cues(cues: Sequence[Cue]) -> str:
         return "[]"
     return json.dumps(
         [{"id": cue.id, "source": cue.source} for cue in cues],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _format_qa_candidates(candidates: Sequence[QACandidate]) -> str:
+    if not candidates:
+        return "[]"
+    return json.dumps(
+        [
+            {
+                "id": candidate.cue.id,
+                "source": candidate.cue.source,
+                "translation": candidate.translation,
+                "issues": [
+                    {
+                        "severity": issue.severity,
+                        "reason": issue.reason,
+                    }
+                    for issue in candidate.issues
+                ],
+            }
+            for candidate in candidates
+        ],
         ensure_ascii=False,
         indent=2,
     )

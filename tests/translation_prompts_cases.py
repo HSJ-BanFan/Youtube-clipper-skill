@@ -1,7 +1,13 @@
 import unittest
 
 from translation.models import Cue, TranslationBatch
-from translation.prompts import PROMPT_VERSION, build_translation_prompt
+from translation.prompts import (
+    PROMPT_VERSION,
+    QA_PROMPT_VERSION,
+    build_suspicious_qa_prompt,
+    build_translation_prompt,
+)
+from translation.qa import QACandidate, QAIssue
 
 
 def cue(cue_id, source):
@@ -120,6 +126,62 @@ class TranslationPromptTests(unittest.TestCase):
 
         self.assertIn("do not translate context", prompt)
         self.assertIn("do not translate global context", prompt)
+
+
+class SuspiciousQAPromptTests(unittest.TestCase):
+    def test_qa_prompt_version_is_stable_for_reports(self):
+        self.assertEqual(QA_PROMPT_VERSION, "translation-v2-suspicious-qa-v1")
+
+    def test_qa_prompt_contains_candidate_id_source_translation_and_issues(self):
+        candidate = QACandidate(
+            cue=cue("7", "open https://example.test/docs"),
+            translation="打开文档",
+            issues=(QAIssue(cue_id="7", severity="medium", reason="url count mismatch"),),
+        )
+
+        prompt = build_suspicious_qa_prompt([candidate], "zh-CN")
+
+        self.assertIn('"id": "7"', prompt)
+        self.assertIn('"source": "open https://example.test/docs"', prompt)
+        self.assertIn('"translation": "打开文档"', prompt)
+        self.assertIn('"severity": "medium"', prompt)
+        self.assertIn('"reason": "url count mismatch"', prompt)
+
+    def test_qa_prompt_requires_json_only_and_keep_or_fix_actions(self):
+        candidate = QACandidate(
+            cue=cue("1", "hello world"),
+            translation="你好世界",
+            issues=(QAIssue(cue_id="1", severity="low", reason="translation unusually short"),),
+        )
+
+        prompt = build_suspicious_qa_prompt([candidate], "zh-CN")
+
+        self.assertIn("only return JSON", prompt)
+        self.assertIn("do not return Markdown", prompt)
+        self.assertIn('"action": "keep" | "fix"', prompt)
+        self.assertIn("Only fix obvious errors", prompt)
+        self.assertIn("do not add, delete, or reorder ids", prompt)
+
+    def test_qa_prompt_includes_glossary_and_global_context_without_outputting_context(self):
+        candidate = QACandidate(
+            cue=cue("2", "ship the release"),
+            translation="发布版本",
+            issues=(QAIssue(cue_id="2", severity="medium", reason="translation unusually short"),),
+        )
+
+        prompt = build_suspicious_qa_prompt(
+            [candidate],
+            "zh-CN",
+            glossary_text="release = 发布版本",
+            global_context_text="This video explains a Python CLI release workflow.",
+        )
+
+        self.assertIn("Glossary", prompt)
+        self.assertIn("release = 发布版本", prompt)
+        self.assertIn("Global Context", prompt)
+        self.assertIn("This video explains a Python CLI release workflow.", prompt)
+        self.assertIn("do not translate global context", prompt.lower())
+        self.assertIn("do not output global context", prompt.lower())
 
 
 if __name__ == "__main__":

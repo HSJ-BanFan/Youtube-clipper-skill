@@ -11,9 +11,10 @@ from translation.config import TranslationConfig
 from translation.context import build_global_context, write_global_context
 from translation.glossary import load_glossary
 from translation.models import Cue, PipelineResult, TranslationBatch, TranslationOutputPaths
-from translation.prompts import PROMPT_VERSION, build_translation_prompt
+from translation.prompts import QA_PROMPT_VERSION, PROMPT_VERSION, build_suspicious_qa_prompt, build_translation_prompt
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
-from translation.report import TranslationStats, write_translation_report
+from translation.qa import QACandidate, find_suspicious_translations
+from translation.report import QAStats, TranslationStats, write_translation_report
 from translation.subtitles import (
     detect_subtitle_format,
     parse_subtitle_file,
@@ -111,9 +112,10 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
         if cache is not None:
             cache.close()
 
-    validate_translations(cues, all_translations)
-    write_translated_srt(cues, all_translations, output_paths.translated_srt)
-    write_bilingual_srt(cues, all_translations, output_paths.bilingual_srt)
+    final_translations = _run_suspicious_qa(cues, all_translations, config, glossary.text, global_context.text, provider, stats)
+    validate_translations(cues, final_translations)
+    write_translated_srt(cues, final_translations, output_paths.translated_srt)
+    write_bilingual_srt(cues, final_translations, output_paths.bilingual_srt)
     write_global_context(global_context, output_paths.global_context)
 
     result = PipelineResult(
@@ -168,6 +170,47 @@ def parse_translation_response(
     return translations
 
 
+def parse_qa_response(
+    response_text: str,
+    candidates: list[QACandidate] | tuple[QACandidate, ...] | list[Cue] | tuple[Cue, ...],
+) -> dict[str, str]:
+    expected_ids = [candidate.cue.id if isinstance(candidate, QACandidate) else candidate.id for candidate in candidates]
+    stripped = _strip_json_fence(response_text)
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("QA response is not valid JSON") from exc
+
+    if not isinstance(payload, list):
+        raise RuntimeError("QA response must be a JSON array")
+    if len(payload) != len(expected_ids):
+        raise RuntimeError("QA response item count does not match candidate count")
+
+    fixes: dict[str, str] = {}
+    seen_ids: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise RuntimeError("QA response item must be an object")
+        cue_id = item.get("id")
+        action = item.get("action")
+        translation = item.get("translation")
+        if not isinstance(cue_id, str) or cue_id not in expected_ids:
+            raise RuntimeError("QA response id does not match candidates")
+        if cue_id in seen_ids:
+            raise RuntimeError("QA response contains duplicate id")
+        seen_ids.add(cue_id)
+        if action not in {"keep", "fix"}:
+            raise RuntimeError("QA response action must be keep or fix")
+        if not isinstance(translation, str) or not translation.strip():
+            raise RuntimeError("QA response translation must be a non-empty string")
+        if action == "fix":
+            fixes[cue_id] = translation
+
+    if seen_ids != set(expected_ids):
+        raise RuntimeError("QA response ids do not match candidates")
+    return fixes
+
+
 def build_output_paths(input_path: Path, config: TranslationConfig) -> TranslationOutputPaths:
     output_dir = Path(config.output_dir) if config.output_dir else input_path.parent / "translated"
     return TranslationOutputPaths(
@@ -177,6 +220,40 @@ def build_output_paths(input_path: Path, config: TranslationConfig) -> Translati
         translation_report=output_dir / "translation_report.md",
         global_context=output_dir / "global_context.md",
     )
+
+
+def _run_suspicious_qa(
+    cues: list[Cue],
+    translations: dict[str, str],
+    config: TranslationConfig,
+    glossary_text: str,
+    global_context_text: str,
+    provider: TranslationProvider | None,
+    stats: TranslationStats,
+) -> dict[str, str]:
+    qa_stats = QAStats(qa_mode=config.qa_mode)
+    stats.qa = qa_stats
+    if config.qa_mode != "suspicious-only":
+        return translations
+
+    candidates = find_suspicious_translations(cues, translations, config.target_lang)
+    qa_stats.qa_candidates = len(candidates)
+    qa_stats.issues = tuple(issue for candidate in candidates for issue in candidate.issues)
+    qa_stats.qa_prompt_version = QA_PROMPT_VERSION
+    if not candidates:
+        return translations
+
+    reviewer = provider or OpenAICompatibleProvider(config)
+    prompt = build_suspicious_qa_prompt(candidates, config.target_lang, glossary_text, global_context_text)
+    qa_stats.qa_provider_calls += 1
+    try:
+        fixes = parse_qa_response(reviewer.review_suspicious(prompt), candidates)
+    except RuntimeError:
+        qa_stats.qa_failed += 1
+        raise
+    qa_stats.qa_fixed = len(fixes)
+    qa_stats.qa_kept = len(candidates) - len(fixes)
+    return translations | fixes
 
 
 def _translate_batch_with_retries(
