@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import re
+import unicodedata
 from pathlib import Path
 
 from translation.config import TranslationConfig
-from translation.models import PipelineResult, TranslationOutputPaths
+from translation.models import Cue, PipelineResult, TranslationOutputPaths
+from translation.subtitles import detect_subtitle_format, parse_subtitle_file
 
 
 def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfig) -> PipelineResult:
@@ -12,11 +13,11 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     if not input_path.exists():
         raise FileNotFoundError(f"subtitle_path not found: {input_path}")
 
-    input_format = _detect_input_format(input_path)
+    input_format = detect_subtitle_format(input_path)
     output_paths = build_output_paths(input_path, config)
     _ensure_outputs_do_not_exist(output_paths, config.overwrite)
 
-    cue_count = _count_cues(input_path, input_format)
+    cues = parse_subtitle_file(input_path)
 
     if config.dry_run:
         return PipelineResult(
@@ -25,8 +26,10 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
             output_format="srt",
             output_paths=output_paths,
             dry_run=True,
-            cue_count=cue_count,
+            cue_count=len(cues),
             provider_called=False,
+            first_cue_preview=_preview_cue(cues[0]),
+            last_cue_preview=_preview_cue(cues[-1]),
         )
 
     raise NotImplementedError(
@@ -56,22 +59,13 @@ def _ensure_outputs_do_not_exist(paths: TranslationOutputPaths, overwrite: bool)
         raise FileExistsError(f"output file already exists: {joined}. Add --overwrite to replace outputs.")
 
 
-def _detect_input_format(input_path: Path) -> str:
-    suffix = input_path.suffix.lower()
-    if suffix == ".srt":
-        return "srt"
-    if suffix == ".vtt":
-        return "vtt"
-    raise ValueError("subtitle_path must point to .srt or .vtt")
-
-
-def _count_cues(input_path: Path, input_format: str) -> int:
-    content = input_path.read_text(encoding="utf-8-sig")
-    if input_format == "srt":
-        return len(
-            re.findall(
-                r"(?m)^\s*\d+\s*\r?\n\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}",
-                content,
-            )
-        )
-    return content.count("-->")
+def _preview_cue(cue: Cue) -> str:
+    safe_source = "".join(
+        character
+        for character in cue.source
+        if character.isspace() or not unicodedata.category(character).startswith("C")
+    )
+    preview = " ".join(safe_source.split())
+    if len(preview) <= 80:
+        return preview
+    return f"{preview[:77]}..."

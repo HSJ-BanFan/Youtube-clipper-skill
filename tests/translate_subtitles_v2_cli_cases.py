@@ -145,6 +145,46 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("overwrite: True", result.stdout)
 
+    def test_vtt_dry_run_reports_vtt_input_and_srt_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.vtt"
+            subtitle_path.write_text(
+                "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), str(subtitle_path), "--dry-run"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("input_format: vtt", result.stdout)
+        self.assertIn("output_format: srt", result.stdout)
+        self.assertIn("cue_count: 1", result.stdout)
+
+    def test_non_dry_run_fails_with_clear_unimplemented_message(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), str(subtitle_path)],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Translation provider execution is not implemented", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

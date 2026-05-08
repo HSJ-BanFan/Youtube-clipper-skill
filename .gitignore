@@ -53,3 +53,6 @@ test_*.py
 # Logs
 *.log
 logs/
+
+# Superpowers docs
+docs/superpowers/
