@@ -194,7 +194,11 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("TRANSLATION_API_KEY", result.stderr)
+        self.assertIn(
+            "TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.",
+            result.stderr,
+        )
+        self.assertNotIn("--api-key", result.stderr)
         self.assertNotIn("Authorization", result.stderr)
 
 

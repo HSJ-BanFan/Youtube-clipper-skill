@@ -46,6 +46,24 @@ class TranslationBatchingTests(unittest.TestCase):
 
         self.assertEqual([cue.id for cue in batches[1].cues], ["3", "4"])
 
+    def test_create_batches_rejects_zero_batch_size(self):
+        with self.assertRaisesRegex(ValueError, "batch_size must be greater than 0"):
+            create_batches(make_cues(1), batch_size=0, context_before=0, context_after=0)
+
+    def test_create_batches_rejects_negative_context_before(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "context_before and context_after must be greater than or equal to 0",
+        ):
+            create_batches(make_cues(1), batch_size=1, context_before=-1, context_after=0)
+
+    def test_create_batches_rejects_negative_context_after(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "context_before and context_after must be greater than or equal to 0",
+        ):
+            create_batches(make_cues(1), batch_size=1, context_before=0, context_after=-1)
+
 
 if __name__ == "__main__":
     unittest.main()

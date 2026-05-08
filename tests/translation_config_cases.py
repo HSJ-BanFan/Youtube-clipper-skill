@@ -111,6 +111,23 @@ class TranslationConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mode must be one of"):
             TranslationConfig(mode="invalid")
 
+    def test_target_lang_allows_letters_numbers_and_hyphens(self):
+        config = TranslationConfig(target_lang="zh-CN")
+
+        self.assertEqual(config.target_lang, "zh-CN")
+
+    def test_target_lang_rejects_path_traversal_segments(self):
+        with self.assertRaisesRegex(ValueError, "target_lang must contain only letters, numbers, and hyphens"):
+            TranslationConfig(target_lang="../zh")
+
+    def test_target_lang_rejects_forward_slashes(self):
+        with self.assertRaisesRegex(ValueError, "target_lang must contain only letters, numbers, and hyphens"):
+            TranslationConfig(target_lang="zh/CN")
+
+    def test_target_lang_rejects_backslashes(self):
+        with self.assertRaisesRegex(ValueError, "target_lang must contain only letters, numbers, and hyphens"):
+            TranslationConfig(target_lang=r"zh\CN")
+
     def test_srt_cue_count_ignores_digit_only_text_lines(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             subtitle_path = Path(temp_dir) / "sample.srt"
@@ -180,8 +197,13 @@ class TranslationConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "TRANSLATION_API_KEY"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.",
+            ) as error:
                 run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=False))
+
+        self.assertNotIn("--api-key", str(error.exception))
 
 
 if __name__ == "__main__":

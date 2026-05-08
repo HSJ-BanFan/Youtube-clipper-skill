@@ -4,6 +4,7 @@ import json
 from typing import Any, Protocol, runtime_checkable
 from urllib import request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 from translation.config import TranslationConfig
 
@@ -27,7 +28,7 @@ class OpenAICompatibleProvider(TranslationProvider):
 
     def translate_batch(self, prompt: str) -> str:
         if not self._config.api_key:
-            raise ValueError("TRANSLATION_API_KEY or --api-key is required for translation")
+            raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
 
         response_data = self._post_chat_completion(prompt)
         return _extract_message_content(response_data)
@@ -36,6 +37,10 @@ class OpenAICompatibleProvider(TranslationProvider):
         raise NotImplementedError("suspicious review is deferred to PR4")
 
     def _post_chat_completion(self, prompt: str) -> Any:
+        parsed_base_url = urlparse(self.base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("base_url must use http:// or https://")
+
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         payload = {
             "model": self.model,

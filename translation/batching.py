@@ -9,6 +9,11 @@ def create_batches(
     context_before: int,
     context_after: int,
 ) -> list[TranslationBatch]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than 0")
+    if context_before < 0 or context_after < 0:
+        raise ValueError("context_before and context_after must be greater than or equal to 0")
+
     batches: list[TranslationBatch] = []
     for start in range(0, len(cues), batch_size):
         end = min(start + batch_size, len(cues))

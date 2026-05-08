@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 
 VALID_MODES = {"fast", "balanced", "publish"}
+TARGET_LANG_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 ENV_MAPPING = {
@@ -58,6 +60,8 @@ class TranslationConfig:
         if self.mode not in VALID_MODES:
             valid_modes = ", ".join(sorted(VALID_MODES))
             raise ValueError(f"mode must be one of: {valid_modes}")
+        if not TARGET_LANG_PATTERN.fullmatch(self.target_lang):
+            raise ValueError("target_lang must contain only letters, numbers, and hyphens")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         if self.context_before < 0:

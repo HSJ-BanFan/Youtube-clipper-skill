@@ -41,8 +41,13 @@ class TranslationProviderTests(unittest.TestCase):
     def test_translate_batch_requires_api_key(self):
         provider = OpenAICompatibleProvider(TranslationConfig(api_key=None))
 
-        with self.assertRaisesRegex(ValueError, "TRANSLATION_API_KEY|--api-key"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.",
+        ) as error:
             provider.translate_batch("prompt")
+
+        self.assertNotIn("--api-key", str(error.exception))
 
     def test_translate_batch_posts_chat_completion_request(self):
         captured = {}
@@ -74,6 +79,28 @@ class TranslationProviderTests(unittest.TestCase):
         self.assertEqual(captured["body"]["model"], "deepseek-chat")
         self.assertEqual(captured["body"]["temperature"], 0.2)
         self.assertEqual(captured["body"]["messages"], [{"role": "user", "content": "translate this"}])
+
+    def test_translate_batch_rejects_non_http_base_url_scheme(self):
+        provider = OpenAICompatibleProvider(
+            TranslationConfig(api_key="test-secret", base_url="file:///tmp/test")
+        )
+
+        with self.assertRaisesRegex(ValueError, "base_url must use http:// or https://") as error:
+            provider.translate_batch("prompt")
+
+        self.assertNotIn("test-secret", str(error.exception))
+        self.assertNotIn("Authorization", str(error.exception))
+
+    def test_translate_batch_rejects_base_url_without_netloc(self):
+        provider = OpenAICompatibleProvider(
+            TranslationConfig(api_key="test-secret", base_url="localhost:8317/v1")
+        )
+
+        with self.assertRaisesRegex(ValueError, "base_url must use http:// or https://") as error:
+            provider.translate_batch("prompt")
+
+        self.assertNotIn("test-secret", str(error.exception))
+        self.assertNotIn("Authorization", str(error.exception))
 
     def test_translate_batch_http_error_reports_status_without_secret(self):
         def fake_urlopen(request, timeout=30):

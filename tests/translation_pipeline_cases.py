@@ -62,7 +62,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             output_dir = Path(temp_dir) / "out"
             config = TranslationConfig(api_key="test-secret", output_dir=str(output_dir), batch_size=2)
 
-            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider, create=True):
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
                 result = run_translation_pipeline(subtitle_path, config)
 
             translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
@@ -85,7 +85,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             output_dir = Path(temp_dir) / "out"
             config = TranslationConfig(api_key="test-secret", output_dir=str(output_dir), dry_run=True)
 
-            with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider, create=True):
+            with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider):
                 result = run_translation_pipeline(subtitle_path, config)
 
             self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
@@ -121,7 +121,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
                 max_retries=1,
             )
 
-            with patch("translation.pipeline.OpenAICompatibleProvider", FlakyProvider, create=True):
+            with patch("translation.pipeline.OpenAICompatibleProvider", FlakyProvider):
                 run_translation_pipeline(subtitle_path, config)
 
         self.assertEqual(FlakyProvider.attempts, 2)
@@ -144,8 +144,8 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
                 max_retries=1,
             )
 
-            with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider, create=True):
-                with self.assertRaisesRegex(RuntimeError, "batch_id 1.*2 attempts"):
+            with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider):
+                with self.assertRaisesRegex(RuntimeError, r"(?s)batch_id 1.*2 attempts.*not valid JSON"):
                     run_translation_pipeline(subtitle_path, config)
 
     def test_existing_outputs_require_overwrite_before_provider_call(self):
@@ -160,7 +160,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             (output_dir / "translated.zh-CN.srt").write_text("existing", encoding="utf-8")
             config = TranslationConfig(api_key="test-secret", output_dir=str(output_dir))
 
-            with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider, create=True):
+            with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider):
                 with self.assertRaisesRegex(FileExistsError, "already exists"):
                     run_translation_pipeline(subtitle_path, config)
 

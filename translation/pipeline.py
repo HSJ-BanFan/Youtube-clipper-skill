@@ -43,7 +43,7 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
         )
 
     if not config.api_key:
-        raise ValueError("TRANSLATION_API_KEY or --api-key is required for translation")
+        raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
 
     provider = OpenAICompatibleProvider(config)
     batches = create_batches(cues, config.batch_size, config.context_before, config.context_after)
@@ -131,7 +131,8 @@ def _translate_batch_with_retries(
             return parse_translation_response(response_text, batch.cues, batch.batch_id)
         except (RuntimeError, ValueError) as exc:
             last_error = exc
-    raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts") from last_error
+    detail = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
 
 
 def _attempt_count(config: TranslationConfig) -> int:
