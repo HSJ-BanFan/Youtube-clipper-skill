@@ -8,7 +8,8 @@ from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
 from translation.models import PipelineResult, TranslationOutputPaths
-from translation.report import TranslationStats, write_translation_report
+from translation.qa import QAIssue
+from translation.report import QAStats, TranslationStats, write_translation_report
 
 
 class TranslationReportTests(unittest.TestCase):
@@ -103,6 +104,65 @@ class TranslationReportTests(unittest.TestCase):
             self.assertNotIn("api_key", report)
             self.assertNotIn("sk-should-not-appear", report)
             self.assertNotIn("user:secret", report)
+
+    def test_write_translation_report_contains_qa_stats_and_issue_summary_without_raw_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_paths = TranslationOutputPaths(
+                output_dir=root / "translated",
+                translated_srt=root / "translated" / "translated.zh-CN.srt",
+                bilingual_srt=root / "translated" / "bilingual.srt",
+                translation_report=root / "translated" / "translation_report.md",
+                global_context=root / "translated" / "global_context.md",
+            )
+            result = PipelineResult(
+                input_path=root / "input.en.srt",
+                input_format="srt",
+                output_format="srt",
+                output_paths=output_paths,
+                dry_run=False,
+                cue_count=2,
+                provider_called=True,
+            )
+            config = TranslationConfig(api_key="sk-should-not-appear", qa_mode="suspicious-only")
+            stats = TranslationStats(
+                total_batches=1,
+                provider_calls=1,
+                qa=QAStats(
+                    qa_mode="suspicious-only",
+                    qa_candidates=2,
+                    qa_provider_calls=1,
+                    qa_fixed=1,
+                    qa_kept=1,
+                    qa_failed=0,
+                    qa_prompt_version="translation-v2-suspicious-qa-v1",
+                    issues=(
+                        QAIssue(cue_id="1", severity="high", reason="empty translation"),
+                        QAIssue(cue_id="2", severity="medium", reason="url count mismatch"),
+                    ),
+                ),
+            )
+            glossary = Glossary(path=None, text="", hash="", exists=False, truncated=False)
+            context = GlobalContext(text="", hash="")
+            report_path = root / "translated" / "translation_report.md"
+
+            write_translation_report(report_path, result, config, stats, glossary, context)
+
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("## QA", report)
+        self.assertIn("- qa_mode: suspicious-only", report)
+        self.assertIn("- qa_candidates: 2", report)
+        self.assertIn("- qa_provider_calls: 1", report)
+        self.assertIn("- qa_fixed: 1", report)
+        self.assertIn("- qa_kept: 1", report)
+        self.assertIn("- qa_failed: 0", report)
+        self.assertIn("- qa_prompt_version: translation-v2-suspicious-qa-v1", report)
+        self.assertIn("## QA Issues", report)
+        self.assertIn("- 1 | high | empty translation", report)
+        self.assertIn("- 2 | medium | url count mismatch", report)
+        self.assertNotIn("sk-should-not-appear", report)
+        self.assertNotIn("raw", report.lower())
 
 
 if __name__ == "__main__":

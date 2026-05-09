@@ -8,6 +8,19 @@ from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
 from translation.models import PipelineResult
+from translation.qa import QAIssue
+
+
+@dataclass
+class QAStats:
+    qa_mode: str = "none"
+    qa_candidates: int = 0
+    qa_provider_calls: int = 0
+    qa_fixed: int = 0
+    qa_kept: int = 0
+    qa_failed: int = 0
+    qa_prompt_version: str = ""
+    issues: tuple[QAIssue, ...] = ()
 
 
 @dataclass
@@ -18,6 +31,7 @@ class TranslationStats:
     cache_misses: int = 0
     retries: int = 0
     failed_batches: int = 0
+    qa: QAStats | None = None
 
 
 def write_translation_report(
@@ -59,8 +73,9 @@ def write_translation_report(
         "global_context": result.output_paths.global_context,
         "glossary_truncated": glossary.truncated,
     }
+    qa = stats.qa or QAStats(qa_mode=config.qa_mode)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_report(entries), encoding="utf-8")
+    path.write_text(_render_report(entries, qa), encoding="utf-8")
 
 
 def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str | Path | None:
@@ -69,8 +84,27 @@ def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str 
     return safe_config["glossary_path"]
 
 
-def _render_report(entries: dict[str, Any]) -> str:
+def _render_report(entries: dict[str, Any], qa: QAStats) -> str:
     lines = ["# Translation Report", ""]
     lines.extend(f"- {key}: {value}" for key, value in entries.items())
+    lines.extend(
+        [
+            "",
+            "## QA",
+            f"- qa_mode: {qa.qa_mode}",
+            f"- qa_candidates: {qa.qa_candidates}",
+            f"- qa_provider_calls: {qa.qa_provider_calls}",
+            f"- qa_fixed: {qa.qa_fixed}",
+            f"- qa_kept: {qa.qa_kept}",
+            f"- qa_failed: {qa.qa_failed}",
+            f"- qa_prompt_version: {qa.qa_prompt_version}",
+            "",
+            "## QA Issues",
+        ]
+    )
+    if qa.issues:
+        lines.extend(f"- {issue.cue_id} | {issue.severity} | {issue.reason}" for issue in qa.issues)
+    else:
+        lines.append("- none")
     lines.append("")
     return "\n".join(lines)

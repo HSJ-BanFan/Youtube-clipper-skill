@@ -25,6 +25,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--no-cache", result.stdout)
         self.assertIn("--no-qa", result.stdout)
+        self.assertIn("{suspicious-only,none,off}", result.stdout)
         self.assertNotIn("--api-key", result.stdout)
 
     def test_missing_subtitle_path_returns_usage_error(self):

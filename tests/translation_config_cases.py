@@ -54,6 +54,11 @@ class TranslationConfigTests(unittest.TestCase):
         self.assertTrue(config.cache_enabled)
         self.assertEqual(config.qa_mode, "none")
 
+    def test_qa_mode_accepts_off_as_skip_alias(self):
+        config = TranslationConfig(qa_mode="off")
+
+        self.assertEqual(config.qa_mode, "none")
+
     def test_unsupported_provider_raises_clear_error(self):
         with self.assertRaisesRegex(ValueError, "only openai-compatible is supported"):
             TranslationConfig(provider="gemini")
