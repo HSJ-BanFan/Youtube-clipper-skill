@@ -66,6 +66,17 @@ class SuspiciousTranslationRuleTests(unittest.TestCase):
 
         self.assertIn("missing target-language characters", reasons_for(candidates, "1"))
 
+    def test_ko_long_english_source_with_korean_is_not_marked_missing_target_script(self):
+        cues = [cue("1", "This command configures the translation pipeline and writes subtitle output files.")]
+
+        candidates = find_suspicious_translations(
+            cues,
+            {"1": "이 명령은 번역 파이프라인을 설정하고 자막 출력 파일을 작성합니다."},
+            "ko",
+        )
+
+        self.assertNotIn("missing target-language characters", reasons_for(candidates, "1"))
+
     def test_pure_code_and_url_cues_are_not_forced_to_target_language(self):
         cues = [
             cue("1", "python scripts/translate_subtitles_v2.py --help"),

@@ -168,6 +168,6 @@ def _has_target_script(text: str, target_lang: str) -> bool:
         return True
     if lang == "ja" and re.search(r"[぀-ヿ]", text):
         return True
-    if lang == "ko" and re.search(r"[가-힯]", text):
+    if lang == "ko" and re.search(r"[가-힣]", text):
         return True
     return False
