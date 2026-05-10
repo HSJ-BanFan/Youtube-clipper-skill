@@ -44,6 +44,7 @@ tmp/
 *.vtt
 *.srt
 test_*.py
+!tests/test_download_video_cases.py
 *_test.py
 
 # Logs
