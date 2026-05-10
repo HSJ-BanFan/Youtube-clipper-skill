@@ -113,6 +113,7 @@ def _resolve_max_video_height(env_values: dict[str, str] | None = None) -> str:
         height = env_values.get("MAX_VIDEO_HEIGHT")
     if height is None or not height.strip():
         return "1080"
+    height = height.strip()
     if not height.isdigit():
         raise ValueError(f"MAX_VIDEO_HEIGHT must be an integer: {height}")
     return height
@@ -148,7 +149,21 @@ def _cleanup_temp_cookiefile(cookiefile: Path | None, keep_temp_cookies: bool) -
     if keep_temp_cookies:
         print("[WARN] 保留临时 cookies 文件", file=sys.stderr)
         return
-    cookiefile.unlink(missing_ok=True)
+    try:
+        cookiefile.unlink(missing_ok=True)
+    except OSError:
+        print("[WARN] 清理临时 cookies 文件失败", file=sys.stderr)
+
+
+def _validate_cookie_sources(
+    cookies_from_browser: str | None,
+    cookies_file: str | None,
+    fresh_firefox_cookies: bool,
+) -> None:
+    if cookies_from_browser and cookies_file:
+        raise ValueError("--cookies-from-browser and --cookies-file are mutually exclusive")
+    if fresh_firefox_cookies and (cookies_from_browser or cookies_file):
+        raise ValueError("--fresh-firefox-cookies is mutually exclusive with --cookies-from-browser and --cookies-file")
 
 
 def resolve_download_settings(
@@ -170,10 +185,7 @@ def resolve_download_settings(
 
     if fresh_firefox_profile and not fresh_firefox_cookies:
         fresh_firefox_cookies = True
-    if cookies_from_browser and cookies_file:
-        raise ValueError("--cookies-from-browser and --cookies-file are mutually exclusive")
-    if fresh_firefox_cookies and (cookies_from_browser or cookies_file):
-        raise ValueError("--fresh-firefox-cookies is mutually exclusive with --cookies-from-browser and --cookies-file")
+    _validate_cookie_sources(cookies_from_browser, cookies_file, fresh_firefox_cookies)
 
     resolved_cookie_file = None
     if cookies_file:
@@ -205,6 +217,8 @@ def _sanitize_error_message(message: str, proxy: str | None) -> str:
 
 
 def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, object]:
+    uses_fresh_firefox_cookies = settings["fresh_firefox_cookies"] or settings["fresh_firefox_profile"] is not None
+    _validate_cookie_sources(settings["cookies_from_browser"], settings["cookies_file"], uses_fresh_firefox_cookies)
     max_video_height = settings["max_video_height"]
     ydl_opts = {
         "format": f"bestvideo[height<={max_video_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_video_height}][ext=mp4]/best",
@@ -263,6 +277,9 @@ def download_video(
     if not validate_url(url):
         raise ValueError(f"Invalid YouTube URL: {url}")
 
+    uses_fresh_firefox_cookies = fresh_firefox_cookies or fresh_firefox_profile is not None
+    _validate_cookie_sources(cookies_from_browser, cookies_file, uses_fresh_firefox_cookies)
+
     if output_dir is None:
         resolved_output_dir = Path(_resolve_output_dir(None))
     else:
@@ -275,13 +292,14 @@ def download_video(
     print(f"   输出目录: {resolved_output_dir}")
 
     resolved_fresh_cookiefile = fresh_firefox_cookiefile
-    if fresh_firefox_cookies and resolved_fresh_cookiefile is None:
-        resolved_fresh_cookiefile = str(_create_temp_cookiefile())
-    temp_cookiefile = Path(resolved_fresh_cookiefile) if resolved_fresh_cookiefile else None
+    created_temp_cookiefile: Path | None = None
+    if uses_fresh_firefox_cookies and resolved_fresh_cookiefile is None:
+        created_temp_cookiefile = _create_temp_cookiefile()
+        resolved_fresh_cookiefile = str(created_temp_cookiefile)
     settings: DownloadSettings = {
         "cookies_from_browser": cookies_from_browser,
         "cookies_file": cookies_file,
-        "fresh_firefox_cookies": fresh_firefox_cookies,
+        "fresh_firefox_cookies": uses_fresh_firefox_cookies,
         "fresh_firefox_profile": fresh_firefox_profile,
         "fresh_firefox_cookiefile": resolved_fresh_cookiefile,
         "keep_temp_cookies": keep_temp_cookies,
@@ -342,7 +360,7 @@ def download_video(
     except Exception as exc:
         raise RuntimeError(_sanitize_error_message(str(exc), proxy)) from exc
     finally:
-        _cleanup_temp_cookiefile(temp_cookiefile, keep_temp_cookies)
+        _cleanup_temp_cookiefile(created_temp_cookiefile, keep_temp_cookies)
 
 
 def _progress_hook(progress: dict) -> None:
