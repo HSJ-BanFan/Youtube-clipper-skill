@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
 下载 YouTube 视频和字幕
-使用 yt-dlp 下载视频（最高 1080p）和英文字幕
+使用 yt-dlp 下载视频和英文字幕
 """
 
-import sys
+import argparse
 import json
+import os
+import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 try:
     import yt_dlp
@@ -16,106 +20,169 @@ except ImportError:
     sys.exit(1)
 
 from utils import (
-    validate_url,
-    sanitize_filename,
+    ensure_directory,
     format_file_size,
     get_video_duration_display,
-    ensure_directory
+    validate_url,
 )
 
 
-def download_video(url: str, output_dir: str = None) -> dict:
-    """
-    下载 YouTube 视频和字幕
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Download YouTube video, subtitles, and metadata.")
+    parser.add_argument("youtube_url", help="YouTube URL")
+    parser.add_argument("output_dir", nargs="?", help="Output directory")
+    parser.add_argument("--cookies-from-browser", dest="cookies_from_browser", help="Browser source for yt-dlp cookies, e.g. firefox")
+    parser.add_argument("--cookies-file", dest="cookies_file", help="Netscape cookies.txt file path for yt-dlp")
+    parser.add_argument("--proxy", help="Proxy URL for yt-dlp")
+    parser.add_argument("--rate-limit", dest="rate_limit", help="Download rate limit for yt-dlp, e.g. 50K or 4.2M")
+    parser.add_argument("--env-file", default=".env", help="Path to .env file")
+    return parser.parse_args(argv)
 
-    Args:
-        url: YouTube URL
-        output_dir: 输出目录，默认为当前目录
 
-    Returns:
-        dict: {
-            'video_path': 视频文件路径,
-            'subtitle_path': 字幕文件路径,
-            'title': 视频标题,
-            'duration': 视频时长（秒）,
-            'file_size': 文件大小（字节）
-        }
+def _resolve_cli_or_env(cli_value: str | None, env_name: str) -> str | None:
+    if cli_value:
+        return cli_value
+    env_value = os.getenv(env_name)
+    return env_value or None
 
-    Raises:
-        ValueError: 无效的 URL
-        Exception: 下载失败
-    """
-    # 验证 URL
+
+def _resolve_max_video_height() -> str:
+    height = os.getenv("MAX_VIDEO_HEIGHT", "1080")
+    if not height.isdigit():
+        raise ValueError("MAX_VIDEO_HEIGHT must be an integer")
+    return height
+
+
+def _parse_browser_spec(spec: str) -> tuple[str, ...]:
+    parts = tuple(part for part in spec.split(":") if part)
+    if not parts:
+        raise ValueError("cookies-from-browser must not be empty")
+    return parts
+
+
+def resolve_download_settings(args: argparse.Namespace) -> dict[str, str | None]:
+    load_dotenv(args.env_file, override=False)
+
+    cookies_from_browser = _resolve_cli_or_env(args.cookies_from_browser, "YT_DLP_COOKIES_FROM_BROWSER")
+    cookies_file = _resolve_cli_or_env(args.cookies_file, "YT_DLP_COOKIES_FILE")
+    proxy = _resolve_cli_or_env(args.proxy, "YT_DLP_PROXY")
+    rate_limit = _resolve_cli_or_env(args.rate_limit, "YT_DLP_RATE_LIMIT")
+    max_video_height = _resolve_max_video_height()
+
+    if cookies_from_browser and cookies_file:
+        raise ValueError("--cookies-from-browser and --cookies-file are mutually exclusive")
+
+    resolved_cookie_file = None
+    if cookies_file:
+        cookie_path = Path(cookies_file).expanduser().resolve()
+        if not cookie_path.is_file():
+            raise FileNotFoundError(f"Cookies file not found: {cookie_path}")
+        resolved_cookie_file = str(cookie_path)
+
+    return {
+        "cookies_from_browser": cookies_from_browser,
+        "cookies_file": resolved_cookie_file,
+        "proxy": proxy,
+        "rate_limit": rate_limit,
+        "max_video_height": max_video_height,
+    }
+
+
+def _sanitize_error_message(message: str, proxy: str | None) -> str:
+    if not proxy:
+        return message
+    return message.replace(proxy, "<redacted-proxy>")
+
+
+def build_ydl_opts(output_dir: Path, settings: dict[str, str | None]) -> dict:
+    max_video_height = settings["max_video_height"] or "1080"
+    ydl_opts = {
+        "format": f"bestvideo[height<={max_video_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_video_height}][ext=mp4]/best",
+        "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en"],
+        "subtitlesformat": "vtt",
+        "writethumbnail": False,
+        "quiet": False,
+        "no_warnings": False,
+        "progress_hooks": [_progress_hook],
+    }
+
+    cookies_from_browser = settings.get("cookies_from_browser")
+    cookies_file = settings.get("cookies_file")
+    proxy = settings.get("proxy")
+    rate_limit = settings.get("rate_limit")
+
+    if cookies_from_browser:
+        ydl_opts["cookiesfrombrowser"] = _parse_browser_spec(cookies_from_browser)
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+    if proxy:
+        ydl_opts["proxy"] = proxy
+    if rate_limit:
+        ydl_opts["ratelimit"] = rate_limit
+
+    return ydl_opts
+
+
+def download_video(
+    url: str,
+    output_dir: str | None = None,
+    *,
+    cookies_from_browser: str | None = None,
+    cookies_file: str | None = None,
+    proxy: str | None = None,
+    rate_limit: str | None = None,
+    max_video_height: str = "1080",
+) -> dict:
     if not validate_url(url):
         raise ValueError(f"Invalid YouTube URL: {url}")
 
-    # 设置输出目录
     if output_dir is None:
-        output_dir = Path.cwd()
+        resolved_output_dir = Path.cwd()
     else:
-        output_dir = Path(output_dir)
+        resolved_output_dir = Path(output_dir)
 
-    output_dir = ensure_directory(output_dir)
+    resolved_output_dir = ensure_directory(resolved_output_dir)
 
-    print(f"🎬 开始下载视频...")
+    print("[INFO] 开始下载视频...")
     print(f"   URL: {url}")
-    print(f"   输出目录: {output_dir}")
+    print(f"   输出目录: {resolved_output_dir}")
 
-    # 配置 yt-dlp 选项
-    ydl_opts = {
-        # 视频格式：最高 1080p，优先 mp4
-        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
-
-        # 输出模板：包含视频 ID（避免特殊字符问题）
-        'outtmpl': str(output_dir / '%(id)s.%(ext)s'),
-
-        # 下载字幕
-        'writesubtitles': True,
-        'writeautomaticsub': True,  # 自动字幕作为备选
-        'subtitleslangs': ['en'],   # 英文字幕
-        'subtitlesformat': 'vtt',   # VTT 格式
-
-        # 不下载缩略图
-        'writethumbnail': False,
-
-        # 静默模式（减少输出）
-        'quiet': False,
-        'no_warnings': False,
-
-        # 进度钩子
-        'progress_hooks': [_progress_hook],
+    settings = {
+        "cookies_from_browser": cookies_from_browser,
+        "cookies_file": cookies_file,
+        "proxy": proxy,
+        "rate_limit": rate_limit,
+        "max_video_height": max_video_height,
     }
+    ydl_opts = build_ydl_opts(resolved_output_dir, settings)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 提取信息
-            print("\n📊 获取视频信息...")
+            print("\n[INFO] 获取视频信息...")
             info = ydl.extract_info(url, download=False)
 
-            title = info.get('title', 'Unknown')
-            duration = info.get('duration', 0)
-            video_id = info.get('id', 'unknown')
+            title = info.get("title", "Unknown")
+            duration = info.get("duration", 0)
+            video_id = info.get("id", "unknown")
 
             print(f"   标题: {title}")
             print(f"   时长: {get_video_duration_display(duration)}")
             print(f"   视频ID: {video_id}")
 
-            # 下载视频
-            print(f"\n📥 开始下载...")
+            print("\n[INFO] 开始下载...")
             info = ydl.extract_info(url, download=True)
 
-            # 获取下载的文件路径
             video_filename = ydl.prepare_filename(info)
             video_path = Path(video_filename)
 
-            # 查找字幕文件
             subtitle_path = None
-            subtitle_exts = ['.en.vtt', '.vtt']
+            subtitle_exts = [".en.vtt", ".vtt"]
             for ext in subtitle_exts:
                 potential_sub = video_path.with_suffix(ext)
-                # 处理带语言代码的字幕文件
                 if not potential_sub.exists():
-                    # 尝试 <filename>.en.vtt 格式
                     stem = video_path.stem
                     potential_sub = video_path.parent / f"{stem}.en.vtt"
 
@@ -123,88 +190,81 @@ def download_video(url: str, output_dir: str = None) -> dict:
                     subtitle_path = potential_sub
                     break
 
-            # 获取文件大小
             file_size = video_path.stat().st_size if video_path.exists() else 0
 
-            # 验证下载结果
             if not video_path.exists():
                 raise Exception("Video file not found after download")
 
-            print(f"\n✅ 视频下载完成: {video_path.name}")
+            print(f"\n[OK] 视频下载完成: {video_path.name}")
             print(f"   大小: {format_file_size(file_size)}")
 
             if subtitle_path and subtitle_path.exists():
-                print(f"✅ 字幕下载完成: {subtitle_path.name}")
+                print(f"[OK] 字幕下载完成: {subtitle_path.name}")
             else:
-                print(f"⚠️  未找到英文字幕")
-                print(f"   提示：某些视频可能没有字幕或需要自动生成")
+                print("[WARN] 未找到英文字幕")
+                print("   提示：某些视频可能没有字幕或需要自动生成")
 
             return {
-                'video_path': str(video_path),
-                'subtitle_path': str(subtitle_path) if subtitle_path else None,
-                'title': title,
-                'duration': duration,
-                'file_size': file_size,
-                'video_id': video_id
+                "video_path": str(video_path),
+                "subtitle_path": str(subtitle_path) if subtitle_path else None,
+                "title": title,
+                "duration": duration,
+                "file_size": file_size,
+                "video_id": video_id,
             }
 
-    except Exception as e:
-        print(f"\n❌ 下载失败: {str(e)}")
+    except Exception as exc:
+        sanitized_message = _sanitize_error_message(str(exc), proxy)
+        print(f"\n[ERROR] 下载失败: {sanitized_message}")
         raise
 
 
-def _progress_hook(d):
-    """下载进度回调"""
-    if d['status'] == 'downloading':
-        # 显示下载进度
-        if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
-            percent = d['downloaded_bytes'] / d['total_bytes'] * 100
-            downloaded = format_file_size(d['downloaded_bytes'])
-            total = format_file_size(d['total_bytes'])
-            speed = d.get('speed', 0)
-            speed_str = format_file_size(speed) + '/s' if speed else 'N/A'
+def _progress_hook(progress: dict) -> None:
+    if progress["status"] == "downloading":
+        if "downloaded_bytes" in progress and "total_bytes" in progress and progress["total_bytes"]:
+            percent = progress["downloaded_bytes"] / progress["total_bytes"] * 100
+            downloaded = format_file_size(progress["downloaded_bytes"])
+            total = format_file_size(progress["total_bytes"])
+            speed = progress.get("speed", 0)
+            speed_str = format_file_size(speed) + "/s" if speed else "N/A"
 
-            # 使用 \r 实现进度条覆盖
             bar_length = 30
             filled = int(bar_length * percent / 100)
-            bar = '█' * filled + '░' * (bar_length - filled)
+            bar = "#" * filled + "-" * (bar_length - filled)
 
-            print(f"\r   [{bar}] {percent:.1f}% - {downloaded}/{total} - {speed_str}", end='', flush=True)
-        elif 'downloaded_bytes' in d:
-            # 无总大小信息时，只显示已下载
-            downloaded = format_file_size(d['downloaded_bytes'])
-            speed = d.get('speed', 0)
-            speed_str = format_file_size(speed) + '/s' if speed else 'N/A'
-            print(f"\r   下载中... {downloaded} - {speed_str}", end='', flush=True)
-
-    elif d['status'] == 'finished':
-        print()  # 换行
+            print(f"\r   [{bar}] {percent:.1f}% - {downloaded}/{total} - {speed_str}", end="", flush=True)
+        elif "downloaded_bytes" in progress:
+            downloaded = format_file_size(progress["downloaded_bytes"])
+            speed = progress.get("speed", 0)
+            speed_str = format_file_size(speed) + "/s" if speed else "N/A"
+            print(f"\r   下载中... {downloaded} - {speed_str}", end="", flush=True)
+    elif progress["status"] == "finished":
+        print()
 
 
-def main():
-    """命令行入口"""
-    if len(sys.argv) < 2:
-        print("Usage: python download_video.py <youtube_url> [output_dir]")
-        print("\nExample:")
-        print("  python download_video.py https://youtube.com/watch?v=Ckt1cj0xjRM")
-        print("  python download_video.py https://youtube.com/watch?v=Ckt1cj0xjRM ~/Downloads")
-        sys.exit(1)
-
-    url = sys.argv[1]
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     try:
-        result = download_video(url, output_dir)
-
-        # 输出 JSON 结果（供其他脚本使用）
-        print("\n" + "="*60)
+        settings = resolve_download_settings(args)
+        result = download_video(
+            args.youtube_url,
+            args.output_dir,
+            cookies_from_browser=settings["cookies_from_browser"],
+            cookies_file=settings["cookies_file"],
+            proxy=settings["proxy"],
+            rate_limit=settings["rate_limit"],
+            max_video_height=settings["max_video_height"] or "1080",
+        )
+        print("\n" + "=" * 60)
         print("下载结果 (JSON):")
         print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    except Exception as e:
-        print(f"\n❌ 错误: {str(e)}")
-        sys.exit(1)
+        return 0
+    except Exception as exc:
+        sanitized_message = _sanitize_error_message(str(exc), getattr(args, "proxy", None) or os.getenv("YT_DLP_PROXY"))
+        print(f"\n[ERROR] 错误: {sanitized_message}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
