@@ -16,6 +16,10 @@ build/
 .env
 .env.local
 .env.*.local
+.translation_cache*
+
+# Local agent state
+.omc/
 
 # IDE
 .vscode/
@@ -50,3 +54,6 @@ test_*.py
 # Logs
 *.log
 logs/
+
+# Superpowers docs
+docs/superpowers/
