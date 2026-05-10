@@ -4,12 +4,15 @@
 使用 yt-dlp 下载视频和英文字幕
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -40,6 +43,7 @@ class DownloadSettings(TypedDict):
     proxy: str | None
     rate_limit: str | None
     max_video_height: str
+    output_dir: str
 
 
 class DownloadResult(TypedDict):
@@ -101,14 +105,16 @@ def _create_temp_cookiefile() -> Path:
     return Path(cookiefile_path)
 
 
-def _resolve_max_video_height(env_values: dict[str, str]) -> str:
+def _resolve_max_video_height(env_values: dict[str, str] | None = None) -> str:
+    if env_values is None:
+        env_values = {}
     height = os.getenv("MAX_VIDEO_HEIGHT")
     if height is None:
         height = env_values.get("MAX_VIDEO_HEIGHT")
-    if height is None:
-        height = "1080"
+    if height is None or not height.strip():
+        return "1080"
     if not height.isdigit():
-        raise ValueError("MAX_VIDEO_HEIGHT must be an integer")
+        raise ValueError(f"MAX_VIDEO_HEIGHT must be an integer: {height}")
     return height
 
 
@@ -117,6 +123,23 @@ def _parse_browser_spec(spec: str) -> tuple[str, ...]:
     if not parts:
         raise ValueError("cookies-from-browser must not be empty")
     return parts
+
+
+def _timestamped_output_dir(base_dir: str | Path) -> str:
+    return str(Path(base_dir) / datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+
+def _resolve_output_dir(cli_output_dir: str | None, env_values: dict[str, str] | None = None) -> str:
+    if cli_output_dir:
+        return cli_output_dir
+    if env_values is None:
+        env_values = {}
+    env_output_dir = os.getenv("OUTPUT_DIR")
+    if env_output_dir is None:
+        env_output_dir = env_values.get("OUTPUT_DIR")
+    if env_output_dir and env_output_dir.strip():
+        return _timestamped_output_dir(env_output_dir)
+    return _timestamped_output_dir(Path("youtube-clips"))
 
 
 def _cleanup_temp_cookiefile(cookiefile: Path | None, keep_temp_cookies: bool) -> None:
@@ -143,6 +166,7 @@ def resolve_download_settings(
     proxy = _resolve_cli_or_env(args.proxy, "YT_DLP_PROXY", env_values)
     rate_limit = _resolve_cli_or_env(args.rate_limit, "YT_DLP_RATE_LIMIT", env_values)
     max_video_height = _resolve_max_video_height(env_values)
+    output_dir = _resolve_output_dir(args.output_dir, env_values)
 
     if fresh_firefox_profile and not fresh_firefox_cookies:
         fresh_firefox_cookies = True
@@ -168,14 +192,16 @@ def resolve_download_settings(
         "proxy": proxy,
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
+        "output_dir": output_dir,
     }
 
 
 def _sanitize_error_message(message: str, proxy: str | None) -> str:
-    sanitized_message = message
+    sanitized = message
     if proxy:
-        sanitized_message = sanitized_message.replace(proxy, "<redacted-proxy>")
-    return re.sub(r"://[^/\s]+@", "://<redacted-proxy>@", sanitized_message)
+        sanitized = sanitized.replace(proxy, "<redacted-proxy>")
+    sanitized = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s]+@", r"\1<redacted-proxy>@", sanitized)
+    return re.sub(r"(?<![\w/:])[^\s/@:]+:[^\s/]+@", "<redacted-userinfo>@", sanitized)
 
 
 def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, object]:
@@ -238,7 +264,7 @@ def download_video(
         raise ValueError(f"Invalid YouTube URL: {url}")
 
     if output_dir is None:
-        resolved_output_dir = Path.cwd()
+        resolved_output_dir = Path(_resolve_output_dir(None))
     else:
         resolved_output_dir = Path(output_dir)
 
@@ -262,6 +288,7 @@ def download_video(
         "proxy": proxy,
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
+        "output_dir": str(resolved_output_dir),
     }
     ydl_opts = build_ydl_opts(resolved_output_dir, settings)
 
@@ -285,13 +312,9 @@ def download_video(
             video_path = Path(video_filename)
 
             subtitle_path = None
-            subtitle_candidates = [
-                video_path.with_suffix(".en.vtt"),
-                video_path.with_suffix(".vtt"),
-            ]
-            for candidate in subtitle_candidates:
-                if candidate.exists():
-                    subtitle_path = candidate
+            for potential_sub in (video_path.with_suffix(".en.vtt"), video_path.with_suffix(".vtt")):
+                if potential_sub.exists():
+                    subtitle_path = potential_sub
                     break
 
             file_size = video_path.stat().st_size if video_path.exists() else 0
@@ -354,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = resolve_download_settings(args, env_values)
         result = download_video(
             args.youtube_url,
-            args.output_dir,
+            settings["output_dir"],
             cookies_from_browser=settings["cookies_from_browser"],
             cookies_file=settings["cookies_file"],
             fresh_firefox_cookies=settings["fresh_firefox_cookies"],

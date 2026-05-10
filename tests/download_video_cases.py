@@ -52,6 +52,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "proxy": None,
             "rate_limit": None,
             "max_video_height": "1080",
+            "output_dir": "out",
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -217,6 +218,69 @@ class DownloadVideoSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings["rate_limit"], "50K")
 
+    def test_empty_max_video_height_uses_default(self):
+        with patch.dict(os.environ, {"MAX_VIDEO_HEIGHT": ""}, clear=True):
+            self.assertEqual(download_video._resolve_max_video_height(), "1080")
+
+    def test_non_numeric_max_video_height_error_includes_value(self):
+        with patch.dict(os.environ, {"MAX_VIDEO_HEIGHT": "large"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "large"):
+                download_video._resolve_max_video_height()
+
+    def test_cli_output_dir_overrides_env_output_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cli_output_dir = Path(temp_dir) / "cli-out"
+            env_output_dir = Path(temp_dir) / "env-out"
+            args = download_video.parse_args(
+                [
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    str(cli_output_dir),
+                    "--env-file",
+                    str(Path(temp_dir) / "missing.env"),
+                ]
+            )
+
+            with patch.dict(os.environ, {"OUTPUT_DIR": str(env_output_dir)}, clear=True):
+                settings = download_video.resolve_download_settings(args)
+
+        self.assertEqual(settings["output_dir"], str(cli_output_dir))
+
+    def test_env_output_dir_adds_timestamp_child(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_output_dir = Path(temp_dir) / "env-out"
+            args = download_video.parse_args(
+                [
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    "--env-file",
+                    str(Path(temp_dir) / "missing.env"),
+                ]
+            )
+
+            with patch.dict(os.environ, {"OUTPUT_DIR": str(env_output_dir)}, clear=True):
+                settings = download_video.resolve_download_settings(args)
+
+        output_dir = Path(settings["output_dir"])
+        self.assertEqual(output_dir.parent, env_output_dir)
+        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
+
+    def test_default_output_dir_uses_youtube_clips_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = download_video.parse_args(
+                [
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    "--env-file",
+                    str(Path(temp_dir) / "missing.env"),
+                ]
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                settings = download_video.resolve_download_settings(args)
+
+        output_dir = Path(settings["output_dir"])
+        self.assertEqual(output_dir.parent.name, "youtube-clips")
+        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
+        self.assertNotEqual(output_dir, Path.cwd())
+
     def test_env_file_flag_loads_specified_dotenv(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / "download.env"
@@ -291,6 +355,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "proxy": None,
             "rate_limit": None,
             "max_video_height": "1080",
+            "output_dir": "out",
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -309,6 +374,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "proxy": None,
             "rate_limit": None,
             "max_video_height": "1080",
+            "output_dir": "out",
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -327,6 +393,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "proxy": None,
             "rate_limit": None,
             "max_video_height": "1080",
+            "output_dir": "out",
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -347,6 +414,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "proxy": None,
             "rate_limit": None,
             "max_video_height": "2160",
+            "output_dir": "out",
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -355,13 +423,38 @@ class DownloadVideoSettingsTests(unittest.TestCase):
 
 
 class DownloadVideoExecutionTests(unittest.TestCase):
-    def test_sanitize_error_message_redacts_proxy_credentials(self):
+    def test_sanitize_error_message_redacts_exact_proxy_credentials(self):
         message = "proxy failed: http://user:secret@proxy.example:8080 timeout"
 
         sanitized = download_video._sanitize_error_message(message, "http://user:secret@proxy.example:8080")
 
         self.assertNotIn("secret", sanitized)
         self.assertIn("<redacted-proxy>", sanitized)
+
+    def test_sanitize_error_message_redacts_proxy_with_trailing_slash(self):
+        message = "proxy failed: http://user:secret@proxy.example:8080/ timeout"
+
+        sanitized = download_video._sanitize_error_message(message, "http://user:secret@proxy.example:8080")
+
+        self.assertNotIn("secret", sanitized)
+        self.assertIn("<redacted-proxy>/", sanitized)
+
+    def test_sanitize_error_message_redacts_proxy_userinfo_without_scheme(self):
+        message = "proxy failed: user:secret@proxy.example:8080 timeout"
+
+        sanitized = download_video._sanitize_error_message(message, "http://user:secret@proxy.example:8080")
+
+        self.assertNotIn("secret", sanitized)
+        self.assertIn("<redacted-userinfo>@proxy.example:8080", sanitized)
+
+    def test_sanitize_error_message_redacts_password_containing_at_symbol(self):
+        message = "proxy failed: http://user:p@ss@proxy.example:8080/ timeout"
+
+        sanitized = download_video._sanitize_error_message(message, None)
+
+        self.assertNotIn("p@ss", sanitized)
+        self.assertNotIn("ss@proxy", sanitized)
+        self.assertIn("http://<redacted-proxy>@proxy.example:8080/", sanitized)
 
     def test_sanitize_error_message_redacts_fallback_url_credentials(self):
         message = "proxy failed: http://user:secret@proxy.example:8080 timeout"
@@ -371,6 +464,72 @@ class DownloadVideoExecutionTests(unittest.TestCase):
         self.assertNotIn("secret", sanitized)
         self.assertIn("proxy.example:8080", sanitized)
         self.assertIn("<redacted-proxy>", sanitized)
+
+    def test_download_video_error_does_not_print_error_to_stdout(self):
+        class FailingYoutubeDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                raise RuntimeError("proxy failed: http://user:p@ss@proxy.example:8080/ timeout")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FailingYoutubeDL)):
+                with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                    with self.assertRaises(RuntimeError):
+                        download_video.download_video(
+                            "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                            temp_dir,
+                            proxy="http://user:p@ss@proxy.example:8080",
+                        )
+
+        self.assertNotIn("[ERROR] 下载失败", stdout.getvalue())
+        self.assertNotIn("p@ss", stdout.getvalue())
+        self.assertNotIn("p@ss", stderr.getvalue())
+
+    def test_main_download_failure_redacts_proxy_password_from_output(self):
+        class FailingYoutubeDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                raise RuntimeError("proxy failed: http://user:p@ss@proxy.example:8080/ timeout")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FailingYoutubeDL)):
+                with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                    exit_code = download_video.main(
+                        [
+                            "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                            temp_dir,
+                            "--proxy",
+                            "http://user:p@ss@proxy.example:8080",
+                            "--env-file",
+                            str(Path(temp_dir) / "missing.env"),
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 1)
+        self.assertNotIn("p@ss", stdout.getvalue())
+        self.assertNotIn("p@ss", stderr.getvalue())
+        self.assertNotIn("ss@proxy", stdout.getvalue())
+        self.assertNotIn("ss@proxy", stderr.getvalue())
 
     def test_main_returns_error_for_conflicting_cookie_sources(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -422,6 +581,36 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                     )
 
         self.assertNotIn("secret", str(context.exception))
+
+    def test_download_video_defaults_to_timestamped_youtube_clips_dir(self):
+        class FakeYoutubeDL:
+            last_options = None
+
+            def __init__(self, options):
+                FakeYoutubeDL.last_options = options
+                self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                if download:
+                    self.output_path.write_bytes(b"video")
+                return {"id": "abc123", "title": "Example Video", "duration": 123}
+
+            def prepare_filename(self, info):
+                return str(self.output_path)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            default_output_dir = Path(temp_dir) / "youtube-clips" / "20260510_120000"
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                with patch.object(download_video, "_timestamped_output_dir", return_value=str(default_output_dir)):
+                    download_video.download_video("https://youtube.com/watch?v=Ckt1cj0xjRM")
+
+        self.assertEqual(Path(FakeYoutubeDL.last_options["outtmpl"]).parent, default_output_dir)
 
     def test_download_video_returns_dict_contract(self):
         class FakeYoutubeDL:

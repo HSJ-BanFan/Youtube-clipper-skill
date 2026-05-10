@@ -147,6 +147,9 @@ YT_DLP_COOKIES_FROM_BROWSER=firefox
 # 或使用 Netscape cookies.txt 文件
 YT_DLP_COOKIES_FILE=
 
+# 注意：--cookies-from-browser firefox 会让 yt-dlp 在下载时读取 Firefox cookies。
+# 如需每次下载前导出 fresh Firefox cookies，后续会通过独立 preflight 模式实现。
+
 # 翻译批次大小（推荐 20-25）
 TRANSLATION_BATCH_SIZE=20
 
