@@ -126,13 +126,17 @@ def _parse_browser_spec(spec: str) -> tuple[str, ...]:
     return parts
 
 
+def _normalize_output_dir(path_value: str | Path) -> str:
+    return str(Path(str(path_value).strip()).expanduser())
+
+
 def _timestamped_output_dir(base_dir: str | Path) -> str:
-    return str(Path(base_dir) / datetime.now().strftime("%Y%m%d_%H%M%S"))
+    return str(Path(_normalize_output_dir(base_dir)) / datetime.now().strftime("%Y%m%d_%H%M%S"))
 
 
 def _resolve_output_dir(cli_output_dir: str | None, env_values: dict[str, str] | None = None) -> str:
     if cli_output_dir:
-        return cli_output_dir
+        return _normalize_output_dir(cli_output_dir)
     if env_values is None:
         env_values = {}
     env_output_dir = os.getenv("OUTPUT_DIR")
@@ -283,7 +287,7 @@ def download_video(
     if output_dir is None:
         resolved_output_dir = Path(_resolve_output_dir(None))
     else:
-        resolved_output_dir = Path(output_dir)
+        resolved_output_dir = Path(_normalize_output_dir(output_dir))
 
     resolved_output_dir = ensure_directory(resolved_output_dir)
 

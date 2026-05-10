@@ -267,6 +267,40 @@ class DownloadVideoSettingsTests(unittest.TestCase):
         self.assertEqual(output_dir.parent, env_output_dir)
         self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
 
+    def test_env_output_dir_expands_home_directory(self):
+        home_dir = str(Path.home())
+        args = download_video.parse_args(
+            [
+                "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                "--env-file",
+                str(Path.cwd() / "missing.env"),
+            ]
+        )
+
+        with patch.dict(os.environ, {"OUTPUT_DIR": "~/Downloads", "USERPROFILE": home_dir, "HOME": home_dir}, clear=True):
+            settings = download_video.resolve_download_settings(args)
+
+        output_dir = Path(settings["output_dir"])
+        self.assertEqual(output_dir.parent, Path.home() / "Downloads")
+        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
+
+    def test_cli_output_dir_expands_home_directory(self):
+        home_dir = str(Path.home())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = download_video.parse_args(
+                [
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    "~/Downloads",
+                    "--env-file",
+                    str(Path(temp_dir) / "missing.env"),
+                ]
+            )
+
+            with patch.dict(os.environ, {"USERPROFILE": home_dir, "HOME": home_dir}, clear=True):
+                settings = download_video.resolve_download_settings(args)
+
+        self.assertEqual(Path(settings["output_dir"]), Path.home() / "Downloads")
+
     def test_default_output_dir_uses_youtube_clips_timestamp(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             args = download_video.parse_args(
