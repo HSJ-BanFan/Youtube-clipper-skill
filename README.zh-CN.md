@@ -140,6 +140,16 @@ OUTPUT_DIR=./youtube-clips
 # 视频质量限制（720、1080、1440、2160）
 MAX_VIDEO_HEIGHT=1080
 
+# 浏览器 cookies（适合受限视频或更高质量下载）
+# 推荐：firefox
+YT_DLP_COOKIES_FROM_BROWSER=firefox
+
+# 或使用 Netscape cookies.txt 文件
+YT_DLP_COOKIES_FILE=
+
+# 注意：--cookies-from-browser firefox 会让 yt-dlp 在下载时读取 Firefox cookies。
+# 如需每次下载前导出 fresh Firefox cookies，后续会通过独立 preflight 模式实现。
+
 # 翻译批次大小（推荐 20-25）
 TRANSLATION_BATCH_SIZE=20
 
@@ -257,6 +267,22 @@ YT_DLP_PROXY=http://proxy-server:port
 # 或
 YT_DLP_PROXY=socks5://proxy-server:port
 ```
+
+### 需要登录或更高质量视频源
+
+**症状**：
+- 视频有年龄限制或区域限制
+- 实际下载到的清晰度低于预期
+- 元数据或下载访问被拦截
+
+**解决方案**：在 `.env` 中配置浏览器 cookies 或 cookies 文件：
+```bash
+YT_DLP_COOKIES_FROM_BROWSER=firefox
+# 或
+YT_DLP_COOKIES_FILE=/path/to/cookies.txt
+```
+
+同一时间只使用一种 cookies 来源。
 
 ### 字幕翻译失败
 

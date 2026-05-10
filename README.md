@@ -140,6 +140,16 @@ OUTPUT_DIR=./youtube-clips
 # Video quality limit (720, 1080, 1440, 2160)
 MAX_VIDEO_HEIGHT=1080
 
+# Browser cookies for restricted or higher-quality downloads
+# Recommended: firefox
+YT_DLP_COOKIES_FROM_BROWSER=firefox
+
+# Or use a Netscape cookies.txt file
+YT_DLP_COOKIES_FILE=
+
+# Note: --cookies-from-browser firefox makes yt-dlp read Firefox cookies at download time.
+# Fresh Firefox cookies export before every download will be added later via separate preflight mode.
+
 # Translation batch size (20-25 recommended)
 TRANSLATION_BATCH_SIZE=20
 
@@ -257,6 +267,22 @@ YT_DLP_PROXY=http://proxy-server:port
 # or
 YT_DLP_PROXY=socks5://proxy-server:port
 ```
+
+### Video requires login or better source access
+
+**Symptoms**:
+- age-restricted or region-restricted video
+- lower-quality stream than expected
+- metadata or download access blocked
+
+**Solution**: use browser cookies or a cookies file in `.env`:
+```bash
+YT_DLP_COOKIES_FROM_BROWSER=firefox
+# or
+YT_DLP_COOKIES_FILE=/path/to/cookies.txt
+```
+
+Use only one cookie source at a time.
 
 ### Subtitle translation fails
 
