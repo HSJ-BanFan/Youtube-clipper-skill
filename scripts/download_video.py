@@ -4,10 +4,14 @@
 使用 yt-dlp 下载视频和英文字幕
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -47,9 +51,11 @@ def _resolve_cli_or_env(cli_value: str | None, env_name: str) -> str | None:
 
 
 def _resolve_max_video_height() -> str:
-    height = os.getenv("MAX_VIDEO_HEIGHT", "1080")
+    height = os.getenv("MAX_VIDEO_HEIGHT")
+    if height is None or not height.strip():
+        return "1080"
     if not height.isdigit():
-        raise ValueError("MAX_VIDEO_HEIGHT must be an integer")
+        raise ValueError(f"MAX_VIDEO_HEIGHT must be an integer: {height}")
     return height
 
 
@@ -60,6 +66,19 @@ def _parse_browser_spec(spec: str) -> tuple[str, ...]:
     return parts
 
 
+def _timestamped_output_dir(base_dir: str | Path) -> str:
+    return str(Path(base_dir) / datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+
+def _resolve_output_dir(cli_output_dir: str | None) -> str:
+    if cli_output_dir:
+        return cli_output_dir
+    env_output_dir = os.getenv("OUTPUT_DIR")
+    if env_output_dir and env_output_dir.strip():
+        return _timestamped_output_dir(env_output_dir)
+    return _timestamped_output_dir(Path("youtube-clips"))
+
+
 def resolve_download_settings(args: argparse.Namespace) -> dict[str, str | None]:
     load_dotenv(args.env_file, override=False)
 
@@ -68,6 +87,7 @@ def resolve_download_settings(args: argparse.Namespace) -> dict[str, str | None]
     proxy = _resolve_cli_or_env(args.proxy, "YT_DLP_PROXY")
     rate_limit = _resolve_cli_or_env(args.rate_limit, "YT_DLP_RATE_LIMIT")
     max_video_height = _resolve_max_video_height()
+    output_dir = _resolve_output_dir(args.output_dir)
 
     if cookies_from_browser and cookies_file:
         raise ValueError("--cookies-from-browser and --cookies-file are mutually exclusive")
@@ -85,17 +105,20 @@ def resolve_download_settings(args: argparse.Namespace) -> dict[str, str | None]
         "proxy": proxy,
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
+        "output_dir": output_dir,
     }
 
 
 def _sanitize_error_message(message: str, proxy: str | None) -> str:
-    if not proxy:
-        return message
-    return message.replace(proxy, "<redacted-proxy>")
+    sanitized = message
+    if proxy:
+        sanitized = sanitized.replace(proxy, "<redacted-proxy>")
+    sanitized = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/]+:[^\s/]+@", r"\1<redacted-userinfo>@", sanitized)
+    return re.sub(r"(?<![\w/:])[^\s/@:]+:[^\s/]+@", "<redacted-userinfo>@", sanitized)
 
 
 def build_ydl_opts(output_dir: Path, settings: dict[str, str | None]) -> dict:
-    max_video_height = settings["max_video_height"] or "1080"
+    max_video_height = settings["max_video_height"]
     ydl_opts = {
         "format": f"bestvideo[height<={max_video_height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={max_video_height}][ext=mp4]/best",
         "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
@@ -140,7 +163,7 @@ def download_video(
         raise ValueError(f"Invalid YouTube URL: {url}")
 
     if output_dir is None:
-        resolved_output_dir = Path.cwd()
+        resolved_output_dir = Path(_resolve_output_dir(None))
     else:
         resolved_output_dir = Path(output_dir)
 
@@ -179,13 +202,7 @@ def download_video(
             video_path = Path(video_filename)
 
             subtitle_path = None
-            subtitle_exts = [".en.vtt", ".vtt"]
-            for ext in subtitle_exts:
-                potential_sub = video_path.with_suffix(ext)
-                if not potential_sub.exists():
-                    stem = video_path.stem
-                    potential_sub = video_path.parent / f"{stem}.en.vtt"
-
+            for potential_sub in (video_path.with_suffix(".en.vtt"), video_path.with_suffix(".vtt")):
                 if potential_sub.exists():
                     subtitle_path = potential_sub
                     break
@@ -215,7 +232,7 @@ def download_video(
 
     except Exception as exc:
         sanitized_message = _sanitize_error_message(str(exc), proxy)
-        print(f"\n[ERROR] 下载失败: {sanitized_message}")
+        print(f"\n[ERROR] 下载失败: {sanitized_message}", file=sys.stderr)
         raise
 
 
@@ -249,19 +266,19 @@ def main(argv: list[str] | None = None) -> int:
         settings = resolve_download_settings(args)
         result = download_video(
             args.youtube_url,
-            args.output_dir,
+            settings["output_dir"],
             cookies_from_browser=settings["cookies_from_browser"],
             cookies_file=settings["cookies_file"],
             proxy=settings["proxy"],
             rate_limit=settings["rate_limit"],
-            max_video_height=settings["max_video_height"] or "1080",
+            max_video_height=settings["max_video_height"],
         )
         print("\n" + "=" * 60)
         print("下载结果 (JSON):")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     except Exception as exc:
-        sanitized_message = _sanitize_error_message(str(exc), getattr(args, "proxy", None) or os.getenv("YT_DLP_PROXY"))
+        sanitized_message = _sanitize_error_message(str(exc), args.proxy or os.getenv("YT_DLP_PROXY"))
         print(f"\n[ERROR] 错误: {sanitized_message}", file=sys.stderr)
         return 1
 

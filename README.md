@@ -147,6 +147,9 @@ YT_DLP_COOKIES_FROM_BROWSER=firefox
 # Or use a Netscape cookies.txt file
 YT_DLP_COOKIES_FILE=
 
+# Note: --cookies-from-browser firefox makes yt-dlp read Firefox cookies at download time.
+# Fresh Firefox cookies export before every download will be added later via separate preflight mode.
+
 # Translation batch size (20-25 recommended)
 TRANSLATION_BATCH_SIZE=20
 
