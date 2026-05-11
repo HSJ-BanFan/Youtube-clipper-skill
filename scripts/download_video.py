@@ -126,8 +126,8 @@ def _parse_browser_spec(spec: str) -> tuple[str, ...]:
     return parts
 
 
-def _normalize_output_dir(path: str | Path) -> str:
-    return str(Path(str(path).strip()).expanduser())
+def _normalize_output_dir(path_value: str | Path) -> str:
+    return str(Path(str(path_value).strip()).expanduser())
 
 
 def _timestamped_output_dir(base_dir: str | Path) -> str:
