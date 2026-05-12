@@ -175,27 +175,47 @@ python3 scripts/clip_video.py <video_path> <start_time> <end_time> <output_path>
 - 输出: `<章节标题>_clip.mp4`
 
 #### 5.2 提取字幕片段
-- 从完整字幕中过滤出该时间段的字幕
-- 调整时间戳（减去起始时间，从 00:00:00 开始）
-- 转换为 SRT 格式
-- 输出: `<章节标题>_original.srt`
-
-#### 5.3 翻译字幕（如果用户选择）
 ```bash
-python3 scripts/translate_subtitles.py <subtitle_path>
+python3 scripts/extract_subtitle_clip.py \
+  "$FULL_SUBTITLE_PATH" \
+  "$CHAPTER_START" \
+  "$CHAPTER_END" \
+  "$CLIP_DIR/original.srt"
 ```
-- **批量翻译优化**: 每批 20 条字幕一起翻译（节省 95% API 调用）
+
+输入：
+- 完整字幕：`$FULL_SUBTITLE_PATH`（VTT 或 SRT）
+- 起始时间：`$CHAPTER_START`
+- 结束时间：`$CHAPTER_END`
+
+输出：
+- `$CLIP_DIR/original.srt`
+
+边界规则：
+- 字幕与片段有交集即保留：`cue.end > clip_start and cue.start < clip_end`
+- 超出片段边界的字幕时间会被 clamp 到片段内
+- 输出时间戳从 `00:00:00,000` 开始
+- cue index 从 1 重新编号
+
+#### 5.3 翻译并生成双语字幕（如果用户选择）
+```bash
+python3 scripts/translate_subtitles_v2.py \
+  "$CLIP_DIR/original.srt" \
+  --output "$CLIP_DIR/bilingual.srt"
+```
+- **批量翻译优化**: 每批多条字幕一起翻译，减少 API 调用
 - 翻译策略：
   - 保持技术术语的准确性
   - 口语化表达（适合短视频）
   - 简洁流畅（避免冗长）
-- 输出: `<章节标题>_translated.srt`
+- 输出: `$CLIP_DIR/bilingual.srt`
+- 报告: `$CLIP_DIR/translation_report.md`
 
-#### 5.4 生成双语字幕文件（如果用户选择）
-- 合并英文和中文字幕
+#### 5.4 双语字幕文件（如果用户选择）
+- 由 `translate_subtitles_v2.py --output "$CLIP_DIR/bilingual.srt"` 生成
 - 格式: SRT 双语（每条字幕包含英文和中文）
-- 样式: 英文在上，中文在下
-- 输出: `<章节标题>_bilingual.srt`
+- 样式: 中文在上，英文在下
+- 输出: `$CLIP_DIR/bilingual.srt`
 
 #### 5.5 烧录字幕到视频（如果用户选择）
 ```bash

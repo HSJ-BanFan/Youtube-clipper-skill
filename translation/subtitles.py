@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import SupportsFloat
 
 from translation.models import Cue
 
@@ -14,6 +15,31 @@ _TIMING_RE = re.compile(
 _SKIP_VTT_BLOCK_PREFIXES = ("NOTE", "STYLE", "REGION")
 
 
+def parse_timestamp(value: str | SupportsFloat) -> float:
+    """Parse SRT/VTT timestamps or numeric seconds into seconds."""
+    if not isinstance(value, str):
+        return float(value)
+
+    normalized = value.strip().replace(",", ".")
+    parts = normalized.split(":")
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return int(minutes) * 60 + float(seconds)
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return float(normalized)
+
+
+def format_timestamp(seconds: float) -> str:
+    """Format seconds as an SRT timestamp."""
+    total_millis = max(0, int(round(seconds * 1000)))
+    hours, remainder = divmod(total_millis, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{millis:03d}"
+
+
 def detect_subtitle_format(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".srt":
@@ -23,12 +49,18 @@ def detect_subtitle_format(path: Path) -> str:
     raise ValueError("subtitle_path must point to .srt or .vtt")
 
 
-def parse_subtitle_file(path: Path) -> list[Cue]:
-    subtitle_format = detect_subtitle_format(path)
-    content = path.read_text(encoding="utf-8-sig")
+def parse_subtitle(path: str | Path) -> list[Cue]:
+    """Parse an SRT or VTT file into normalized cues."""
+    subtitle_path = Path(path)
+    subtitle_format = detect_subtitle_format(subtitle_path)
+    content = subtitle_path.read_text(encoding="utf-8-sig")
     if subtitle_format == "srt":
         return parse_srt(content)
     return parse_vtt(content)
+
+
+def parse_subtitle_file(path: Path) -> list[Cue]:
+    return parse_subtitle(path)
 
 
 def parse_srt(content: str) -> list[Cue]:
@@ -77,6 +109,55 @@ def validate_translations(cues: list[Cue], translations: Mapping[str, str]) -> N
             raise ValueError(f"missing translation for cue id {cue.id}")
         if not translations[cue.id].strip():
             raise ValueError(f"translation for cue id {cue.id} is empty")
+
+
+def crop_cues(
+    cues: list[Cue],
+    start: str | SupportsFloat,
+    end: str | SupportsFloat,
+    mode: str = "overlap",
+    rebase: bool = True,
+) -> list[Cue]:
+    """Keep overlapping cues, clamp to clip bounds, and optionally rebase to zero."""
+    if mode != "overlap":
+        raise ValueError("crop mode must be overlap")
+
+    clip_start = parse_timestamp(start)
+    clip_end = parse_timestamp(end)
+    if clip_start >= clip_end:
+        raise ValueError("clip start must be before clip end")
+
+    cropped: list[Cue] = []
+    for cue in cues:
+        cue_start = parse_timestamp(cue.start)
+        cue_end = parse_timestamp(cue.end)
+        if cue_end <= clip_start or cue_start >= clip_end:
+            continue
+
+        new_start = max(cue_start, clip_start)
+        new_end = min(cue_end, clip_end)
+        if rebase:
+            new_start -= clip_start
+            new_end -= clip_start
+
+        index = len(cropped) + 1
+        cropped.append(
+            Cue(
+                id=str(index),
+                index=index,
+                start=format_timestamp(new_start),
+                end=format_timestamp(new_end),
+                source=cue.source,
+                raw_timing=f"{format_timestamp(new_start)} --> {format_timestamp(new_end)}",
+                note=cue.note,
+            )
+        )
+    return cropped
+
+
+def write_srt(cues: list[Cue], path: str | Path) -> None:
+    """Write cues as source-text SRT blocks."""
+    _write_srt_blocks(cues, Path(path), lambda cue: cue.source)
 
 
 def write_translated_srt(cues: list[Cue], translations: Mapping[str, str], path: Path) -> None:
@@ -187,10 +268,7 @@ def _cue_id_for_block(block: list[str], timing_line_index: int, index: int, is_v
 
 
 def _normalize_timestamp(value: str) -> str:
-    normalized = value.replace(".", ",")
-    if normalized.count(":") == 1:
-        return f"00:{normalized}"
-    return normalized
+    return format_timestamp(parse_timestamp(value))
 
 
 def _write_srt_blocks(cues: list[Cue], path: Path, text_for: Callable[[Cue], str]) -> None:

@@ -235,11 +235,17 @@ def parse_qa_response(
 
 
 def build_output_paths(input_path: Path, config: TranslationConfig) -> TranslationOutputPaths:
-    output_dir = Path(config.output_dir) if config.output_dir else input_path.parent / "translated"
+    if config.output_path:
+        bilingual_srt = Path(config.output_path)
+        output_dir = bilingual_srt.parent
+    else:
+        output_dir = Path(config.output_dir) if config.output_dir else input_path.parent / "translated"
+        bilingual_srt = output_dir / "bilingual.srt"
+
     return TranslationOutputPaths(
         output_dir=output_dir,
         translated_srt=output_dir / f"translated.{config.target_lang}.srt",
-        bilingual_srt=output_dir / "bilingual.srt",
+        bilingual_srt=bilingual_srt,
         translation_report=output_dir / "translation_report.md",
         global_context=output_dir / "global_context.md",
     )

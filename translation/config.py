@@ -50,6 +50,7 @@ class TranslationConfig:
     glossary_path: str = "glossary.md"
     qa_mode: str = "suspicious-only"
     output_dir: str | None = None
+    output_path: str | None = None
     dry_run: bool = False
     overwrite: bool = False
 
@@ -77,6 +78,8 @@ class TranslationConfig:
             raise ValueError("max_retries must be greater than or equal to 0")
         if self.qa_mode not in {"suspicious-only", "none"}:
             raise ValueError("qa_mode must be suspicious-only, none, or off (alias for none)")
+        if self.output_dir and self.output_path:
+            raise ValueError("output_dir and output_path cannot both be set")
 
     @property
     def effective_review_model(self) -> str:
@@ -101,6 +104,7 @@ class TranslationConfig:
             "glossary_path": self.glossary_path,
             "qa_mode": self.qa_mode,
             "output_dir": self.output_dir,
+            "output_path": self.output_path,
             "dry_run": self.dry_run,
             "overwrite": self.overwrite,
         }

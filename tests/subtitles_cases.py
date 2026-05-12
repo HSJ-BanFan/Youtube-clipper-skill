@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from translation import subtitles
 from translation.models import Cue
 from translation.subtitles import (
     detect_subtitle_format,
@@ -187,6 +188,97 @@ class SubtitleParserTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "cue index must be 1, got 2"):
             validate_cues(cues)
+
+
+class SubtitleCropTests(unittest.TestCase):
+    def setUp(self):
+        self.cues = [
+            Cue(id="before", index=1, start="00:04:50,000", end="00:04:59,000", source="before"),
+            Cue(id="start", index=2, start="00:04:58,000", end="00:05:03,000", source="starts before"),
+            Cue(id="inside", index=3, start="00:05:04,000", end="00:05:06,500", source="inside"),
+            Cue(id="end", index=4, start="00:05:08,000", end="00:05:12,000", source="ends after"),
+            Cue(id="across", index=5, start="00:04:55,000", end="00:05:15,000", source="across all"),
+            Cue(id="after", index=6, start="00:05:10,000", end="00:05:12,000", source="after"),
+        ]
+
+    def _crop_cues(self, start: str = "00:05:00,000", end: str = "00:05:10,000") -> list[Cue]:
+        self.assertTrue(hasattr(subtitles, "crop_cues"), "crop_cues should exist")
+        return subtitles.crop_cues(self.cues, start, end)
+
+    def test_crop_cues_keeps_cues_fully_inside_clip_and_rebases_to_zero(self):
+        cropped = self._crop_cues()
+
+        inside = cropped[1]
+        self.assertEqual(inside.id, "2")
+        self.assertEqual(inside.index, 2)
+        self.assertEqual(inside.start, "00:00:04,000")
+        self.assertEqual(inside.end, "00:00:06,500")
+        self.assertEqual(inside.source, "inside")
+
+    def test_crop_cues_clamps_cue_starting_before_clip(self):
+        cropped = self._crop_cues()
+
+        self.assertEqual(cropped[0].start, "00:00:00,000")
+        self.assertEqual(cropped[0].end, "00:00:03,000")
+        self.assertEqual(cropped[0].source, "starts before")
+
+    def test_crop_cues_clamps_cue_ending_after_clip(self):
+        cropped = self._crop_cues()
+
+        self.assertEqual(cropped[2].start, "00:00:08,000")
+        self.assertEqual(cropped[2].end, "00:00:10,000")
+        self.assertEqual(cropped[2].source, "ends after")
+
+    def test_crop_cues_clamps_cue_spanning_entire_clip(self):
+        cropped = self._crop_cues()
+
+        self.assertEqual(cropped[3].start, "00:00:00,000")
+        self.assertEqual(cropped[3].end, "00:00:10,000")
+        self.assertEqual(cropped[3].source, "across all")
+
+    def test_crop_cues_drops_cues_fully_before_or_after_clip(self):
+        cropped = self._crop_cues()
+
+        self.assertEqual([cue.source for cue in cropped], ["starts before", "inside", "ends after", "across all"])
+
+    def test_crop_cues_renumbers_indexes_and_ids_from_one(self):
+        cropped = self._crop_cues()
+
+        self.assertEqual([cue.index for cue in cropped], [1, 2, 3, 4])
+        self.assertEqual([cue.id for cue in cropped], ["1", "2", "3", "4"])
+
+    def test_parse_and_format_timestamp_round_trips_hourless_values(self):
+        self.assertTrue(hasattr(subtitles, "parse_timestamp"), "parse_timestamp should exist")
+        self.assertTrue(hasattr(subtitles, "format_timestamp"), "format_timestamp should exist")
+
+        seconds = subtitles.parse_timestamp("05:03.250")
+
+        self.assertEqual(seconds, 303.25)
+        self.assertEqual(subtitles.format_timestamp(seconds), "00:05:03,250")
+
+    def test_write_srt_outputs_vtt_input_as_renumbered_srt(self):
+        self.assertTrue(hasattr(subtitles, "write_srt"), "write_srt should exist")
+        cues = parse_vtt(
+            "WEBVTT\n\n"
+            "intro\n"
+            "00:04:58.000 --> 00:05:03.000\n"
+            "starts before\n\n"
+            "00:05:04.000 --> 00:05:06.000\n"
+            "inside\n\n"
+        )
+        cropped = subtitles.crop_cues(cues, "00:05:00", "00:05:10")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "original.srt"
+
+            subtitles.write_srt(cropped, output_path)
+
+            content = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            content,
+            "1\n00:00:00,000 --> 00:00:03,000\nstarts before\n\n"
+            "2\n00:00:04,000 --> 00:00:06,000\ninside\n\n",
+        )
 
 
 class SubtitleWriterTests(unittest.TestCase):
