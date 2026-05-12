@@ -53,6 +53,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -327,6 +328,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -350,6 +352,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         with patch.dict(os.environ, {"YTDLP_IMPERSONATE": ""}, clear=True):
@@ -357,7 +360,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
 
         self.assertNotIn("impersonate", options)
 
-    def test_ydl_opts_set_impersonate_from_env(self):
+    def test_ydl_opts_set_impersonate_from_settings(self):
         settings = {
             "cookies_from_browser": None,
             "cookies_file": None,
@@ -369,11 +372,10 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
-            "impersonate": None,
+            "impersonate": "chrome:windows-10",
         }
 
-        with patch.dict(os.environ, {"YTDLP_IMPERSONATE": "chrome:windows-10"}, clear=True):
-            options = download_video.build_ydl_opts(Path("out"), settings)
+        options = download_video.build_ydl_opts(Path("out"), settings)
 
         self.assertEqual(options["impersonate"], "chrome:windows-10")
 
@@ -470,6 +472,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -489,6 +492,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -508,6 +512,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "1080",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -529,6 +534,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             "rate_limit": None,
             "max_video_height": "2160",
             "output_dir": "out",
+            "impersonate": None,
         }
 
         options = download_video.build_ydl_opts(Path("out"), settings)
@@ -644,6 +650,44 @@ class DownloadVideoExecutionTests(unittest.TestCase):
         self.assertNotIn("p@ss", stderr.getvalue())
         self.assertNotIn("ss@proxy", stdout.getvalue())
         self.assertNotIn("ss@proxy", stderr.getvalue())
+
+    def test_main_passes_env_file_impersonate_to_ydl_opts(self):
+        class FakeYoutubeDL:
+            last_options = None
+
+            def __init__(self, options):
+                FakeYoutubeDL.last_options = options
+                self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def extract_info(self, url, download=False):
+                if download:
+                    self.output_path.write_bytes(b"video")
+                return {"id": "abc123", "extractor": "youtube", "title": "Example Video", "duration": 123}
+
+            def prepare_filename(self, info):
+                return str(self.output_path)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / "download.env"
+            env_path.write_text("YTDLP_IMPERSONATE=chrome:windows-10\n", encoding="utf-8")
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                exit_code = download_video.main(
+                    [
+                        "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                        temp_dir,
+                        "--env-file",
+                        str(env_path),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(FakeYoutubeDL.last_options["impersonate"], "chrome:windows-10")
 
     def test_main_returns_error_for_conflicting_cookie_sources(self):
         with tempfile.TemporaryDirectory() as temp_dir:

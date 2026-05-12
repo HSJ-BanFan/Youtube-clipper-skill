@@ -265,6 +265,7 @@ def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, ob
     fresh_firefox_profile = settings["fresh_firefox_profile"]
     proxy = settings["proxy"]
     rate_limit = settings["rate_limit"]
+    impersonate = settings["impersonate"]
 
     if fresh_firefox_cookies:
         browser_spec = ("firefox", fresh_firefox_profile) if fresh_firefox_profile else ("firefox",)
@@ -280,7 +281,6 @@ def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, ob
     if rate_limit:
         ydl_opts["ratelimit"] = rate_limit
 
-    impersonate = settings.get("impersonate") or os.getenv("YTDLP_IMPERSONATE", "").strip()
     if impersonate:
         ydl_opts["impersonate"] = impersonate
 
@@ -300,6 +300,7 @@ def download_video(
     proxy: str | None = None,
     rate_limit: str | None = None,
     max_video_height: str = "1080",
+    impersonate: str | None = None,
 ) -> DownloadResult:
     if not validate_url(url):
         raise ValueError(f"Invalid YouTube URL: {url}")
@@ -329,7 +330,7 @@ def download_video(
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
         "output_dir": str(base_output_dir),
-        "impersonate": None,
+        "impersonate": impersonate,
     }
 
     try:
@@ -430,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             proxy=settings["proxy"],
             rate_limit=settings["rate_limit"],
             max_video_height=settings["max_video_height"],
+            impersonate=settings["impersonate"],
         )
         print("\n" + "=" * 60)
         print("下载结果 (JSON):")
