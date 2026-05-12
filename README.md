@@ -147,9 +147,6 @@ YT_DLP_COOKIES_FROM_BROWSER=firefox
 # Or use a Netscape cookies.txt file
 YT_DLP_COOKIES_FILE=
 
-# Note: --cookies-from-browser firefox makes yt-dlp read Firefox cookies at download time.
-# Fresh Firefox cookies export before every download will be added later via separate preflight mode.
-
 # Translation batch size (20-25 recommended)
 TRANSLATION_BATCH_SIZE=20
 
@@ -161,6 +158,22 @@ TARGET_CHAPTER_DURATION=180
 ```
 
 For full configuration options, see [.env.example](.env.example).
+
+### Stable downloads / resume / optional impersonation
+
+The downloader keeps the original yt-dlp quality target and does not default to aria2c. To make long DASH downloads more resilient, it now:
+- reuses a stable per-video download directory under `OUTPUT_DIR/<extractor>_<video_id>/`
+- keeps `.part` files and resumes with yt-dlp `continuedl=True`
+- enables retry, fragment retry, file access retry, socket timeout, and chunked HTTP download tuning
+- optionally enables yt-dlp impersonation when `YTDLP_IMPERSONATE` is set
+
+Example optional setting:
+
+```bash
+YTDLP_IMPERSONATE=chrome:windows-10
+```
+
+Leave it empty if your environment does not need impersonation.
 
 ---
 

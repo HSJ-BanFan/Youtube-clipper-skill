@@ -22,6 +22,7 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("subtitle_path", result.stdout)
         self.assertIn("--output-dir", result.stdout)
+        self.assertIn("--output", result.stdout)
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--no-cache", result.stdout)
         self.assertIn("--no-qa", result.stdout)
@@ -166,6 +167,34 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertIn("input_format: vtt", result.stdout)
         self.assertIn("output_format: srt", result.stdout)
         self.assertIn("cue_count: 1", result.stdout)
+
+    def test_output_sets_explicit_bilingual_srt_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
+                encoding="utf-8",
+            )
+            output_path = Path(temp_dir) / "clip" / "bilingual.srt"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(subtitle_path),
+                    "--output",
+                    str(output_path),
+                    "--dry-run",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"bilingual_srt: {output_path}", result.stdout)
+        self.assertIn(f"translation_report: {output_path.parent / 'translation_report.md'}", result.stdout)
 
     def test_non_dry_run_without_api_key_fails_before_network_call(self):
         with tempfile.TemporaryDirectory() as temp_dir:

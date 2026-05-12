@@ -164,10 +164,33 @@ def parse_translation_response(
         translations[cue_id] = translation
 
     try:
-        validate_translations(expected_cues, translations)
+        _validate_batch_translations(expected_cues, translations)
     except ValueError as exc:
         raise ValueError(f"batch_id {batch_id} {exc}") from exc
     return translations
+
+
+def _validate_batch_translations(cues: list[Cue] | tuple[Cue, ...], translations: dict[str, str]) -> None:
+    if len(translations) != len(cues):
+        raise ValueError(f"translation count {len(translations)} does not match cue count {len(cues)}")
+
+    seen_ids: set[str] = set()
+    for cue in cues:
+        if not cue.id.strip():
+            raise ValueError(f"cue index {cue.index} id is empty")
+        if cue.id in seen_ids:
+            raise ValueError(f"duplicate cue id: {cue.id}")
+        seen_ids.add(cue.id)
+        if not cue.start.strip():
+            raise ValueError(f"cue id {cue.id} start is empty")
+        if not cue.end.strip():
+            raise ValueError(f"cue id {cue.id} end is empty")
+        if not cue.source.strip():
+            raise ValueError(f"cue id {cue.id} source is empty")
+        if cue.id not in translations:
+            raise ValueError(f"missing translation for cue id {cue.id}")
+        if not translations[cue.id].strip():
+            raise ValueError(f"translation for cue id {cue.id} is empty")
 
 
 def parse_qa_response(
@@ -212,11 +235,17 @@ def parse_qa_response(
 
 
 def build_output_paths(input_path: Path, config: TranslationConfig) -> TranslationOutputPaths:
-    output_dir = Path(config.output_dir) if config.output_dir else input_path.parent / "translated"
+    if config.output_path:
+        bilingual_srt = Path(config.output_path)
+        output_dir = bilingual_srt.parent
+    else:
+        output_dir = Path(config.output_dir) if config.output_dir else input_path.parent / "translated"
+        bilingual_srt = output_dir / "bilingual.srt"
+
     return TranslationOutputPaths(
         output_dir=output_dir,
         translated_srt=output_dir / f"translated.{config.target_lang}.srt",
-        bilingual_srt=output_dir / "bilingual.srt",
+        bilingual_srt=bilingual_srt,
         translation_report=output_dir / "translation_report.md",
         global_context=output_dir / "global_context.md",
     )

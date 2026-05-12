@@ -72,7 +72,7 @@ def clip_video(
         if not ffmpeg_path:
             raise RuntimeError("FFmpeg not found. Please install FFmpeg.")
 
-    print(f"\n✂️  剪辑视频片段...")
+    print("\n✂️  剪辑视频片段...")
     print(f"   输入: {video_path.name}")
     print(f"   起始时间: {seconds_to_time(start_seconds)} ({start_seconds}s)")
     print(f"   结束时间: {seconds_to_time(end_seconds)} ({end_seconds}s)")
@@ -95,7 +95,7 @@ def clip_video(
         str(output_path)
     ]
 
-    print(f"   执行 FFmpeg...")
+    print("   执行 FFmpeg...")
 
     # 执行 FFmpeg
     result = subprocess.run(
@@ -105,7 +105,7 @@ def clip_video(
     )
 
     if result.returncode != 0:
-        print(f"\n❌ FFmpeg 执行失败:")
+        print("\n❌ FFmpeg 执行失败:")
         print(result.stderr)
         raise RuntimeError(f"FFmpeg failed with return code {result.returncode}")
 
@@ -115,90 +115,11 @@ def clip_video(
 
     # 获取文件大小
     output_size = output_path.stat().st_size
-    print(f"✅ 剪辑完成")
+    print("✅ 剪辑完成")
     print(f"   输出文件: {output_path}")
     print(f"   文件大小: {format_file_size(output_size)}")
 
     return str(output_path)
-
-
-def extract_subtitle_segment(
-    subtitles: list,
-    start_time: float,
-    end_time: float,
-    adjust_timestamps: bool = True
-) -> list:
-    """
-    从完整字幕中提取指定时间段的字幕
-
-    Args:
-        subtitles: 完整字幕列表（每项包含 {start, end, text}）
-        start_time: 起始时间（秒）
-        end_time: 结束时间（秒）
-        adjust_timestamps: 是否调整时间戳（减去起始时间）
-
-    Returns:
-        list: 提取的字幕列表
-    """
-    segment_subtitles = []
-
-    for sub in subtitles:
-        # 字幕在时间范围内
-        if sub['start'] >= start_time and sub['end'] <= end_time:
-            if adjust_timestamps:
-                # 调整时间戳（相对于片段起始时间）
-                adjusted_sub = {
-                    'start': sub['start'] - start_time,
-                    'end': sub['end'] - start_time,
-                    'text': sub['text']
-                }
-                segment_subtitles.append(adjusted_sub)
-            else:
-                segment_subtitles.append(sub.copy())
-
-        # 字幕跨越时间范围边界（部分重叠）
-        elif sub['start'] < end_time and sub['end'] > start_time:
-            if adjust_timestamps:
-                adjusted_sub = {
-                    'start': max(0, sub['start'] - start_time),
-                    'end': min(end_time - start_time, sub['end'] - start_time),
-                    'text': sub['text']
-                }
-                segment_subtitles.append(adjusted_sub)
-            else:
-                segment_subtitles.append(sub.copy())
-
-    return segment_subtitles
-
-
-def save_subtitles_as_srt(subtitles: list, output_path: str):
-    """
-    保存字幕为 SRT 格式
-
-    Args:
-        subtitles: 字幕列表
-        output_path: 输出文件路径
-    """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for i, sub in enumerate(subtitles, 1):
-            # SRT 序号
-            f.write(f"{i}\n")
-
-            # SRT 时间戳（使用逗号分隔毫秒）
-            start_time = seconds_to_time(sub['start'], include_hours=True, use_comma=True)
-            end_time = seconds_to_time(sub['end'], include_hours=True, use_comma=True)
-            f.write(f"{start_time} --> {end_time}\n")
-
-            # 字幕文本
-            f.write(f"{sub['text']}\n")
-
-            # 空行分隔
-            f.write("\n")
-
-    print(f"✅ 字幕已保存: {output_path}")
 
 
 def main():

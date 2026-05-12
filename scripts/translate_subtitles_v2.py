@@ -9,9 +9,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from translation.config import load_config
-from translation.models import PipelineResult
-from translation.pipeline import run_translation_pipeline
+from translation.config import load_config  # noqa: E402
+from translation.models import PipelineResult  # noqa: E402
+from translation.pipeline import run_translation_pipeline  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -19,6 +19,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("subtitle_path", help="Input subtitle file (.srt or .vtt)")
     parser.add_argument("--env-file", default=".env", help="Path to .env file")
     parser.add_argument("--output-dir", help="Output directory; defaults to <subtitle_dir>/translated")
+    parser.add_argument("--output", dest="output_path", help="Explicit bilingual SRT output path")
     parser.add_argument("--target-lang", dest="target_lang", help="Target language, e.g. zh-CN")
     parser.add_argument("--model", help="Translation model name")
     parser.add_argument("--review-model", dest="review_model", help="QA/review model name")
@@ -69,6 +70,7 @@ def _namespace_to_config_args(args: argparse.Namespace) -> dict[str, object]:
         "glossary_path": args.glossary_path,
         "qa_mode": args.qa_mode,
         "output_dir": args.output_dir,
+        "output_path": args.output_path,
         "dry_run": args.dry_run,
         "overwrite": args.overwrite,
     }
