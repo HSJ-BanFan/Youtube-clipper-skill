@@ -44,6 +44,7 @@ class DownloadSettings(TypedDict):
     rate_limit: str | None
     max_video_height: str
     output_dir: str
+    impersonate: str | None
 
 
 class DownloadResult(TypedDict):
@@ -61,7 +62,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("output_dir", nargs="?", help="Output directory")
     parser.add_argument("--cookies-from-browser", dest="cookies_from_browser", help="Browser source for yt-dlp cookies, e.g. firefox")
     parser.add_argument("--cookies-file", dest="cookies_file", help="Netscape cookies.txt file path for yt-dlp")
-    parser.add_argument("--fresh-firefox-cookies", action="store_true", help="Export fresh Firefox cookies into a temporary cookies.txt for this download")
+    parser.add_argument("--fresh-firefox-cookies", action="store_true", help="Use Firefox cookies for this download")
     parser.add_argument("--fresh-firefox-profile", dest="fresh_firefox_profile", help="Firefox profile for fresh cookie export")
     parser.add_argument("--keep-temp-cookies", action="store_true", help="Keep temporary fresh Firefox cookies.txt after download")
     parser.add_argument("--proxy", help="Proxy URL for yt-dlp")
@@ -143,8 +144,21 @@ def _resolve_output_dir(cli_output_dir: str | None, env_values: dict[str, str] |
     if env_output_dir is None:
         env_output_dir = env_values.get("OUTPUT_DIR")
     if env_output_dir and env_output_dir.strip():
-        return _timestamped_output_dir(env_output_dir)
-    return _timestamped_output_dir(Path("youtube-clips"))
+        return _normalize_output_dir(env_output_dir)
+    return _normalize_output_dir(Path("youtube-clips"))
+
+
+def _sanitize_path_component(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^\w.-]+", "_", value.strip().lower()).strip("._")
+    return cleaned or fallback
+
+
+def _stable_video_output_dir(base_dir: Path, info: dict[str, object]) -> Path:
+    extractor_value = info.get("extractor") or info.get("extractor_key") or "video"
+    video_id_value = info.get("id") or "unknown"
+    extractor = _sanitize_path_component(str(extractor_value), "video")
+    video_id = _sanitize_path_component(str(video_id_value), "unknown")
+    return base_dir / f"{extractor}_{video_id}"
 
 
 def _cleanup_temp_cookiefile(cookiefile: Path | None, keep_temp_cookies: bool) -> None:
@@ -186,6 +200,7 @@ def resolve_download_settings(
     rate_limit = _resolve_cli_or_env(args.rate_limit, "YT_DLP_RATE_LIMIT", env_values)
     max_video_height = _resolve_max_video_height(env_values)
     output_dir = _resolve_output_dir(args.output_dir, env_values)
+    impersonate = _resolve_cli_or_env(None, "YTDLP_IMPERSONATE", env_values)
 
     if fresh_firefox_profile and not fresh_firefox_cookies:
         fresh_firefox_cookies = True
@@ -209,6 +224,7 @@ def resolve_download_settings(
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
         "output_dir": output_dir,
+        "impersonate": impersonate,
     }
 
 
@@ -235,21 +251,24 @@ def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, ob
         "quiet": False,
         "no_warnings": False,
         "progress_hooks": [_progress_hook],
+        "continuedl": True,
+        "retries": 20,
+        "fragment_retries": 20,
+        "file_access_retries": 10,
+        "socket_timeout": 30,
+        "http_chunk_size": 10 * 1024 * 1024,
     }
 
     cookies_from_browser = settings["cookies_from_browser"]
     cookies_file = settings["cookies_file"]
     fresh_firefox_cookies = settings["fresh_firefox_cookies"]
     fresh_firefox_profile = settings["fresh_firefox_profile"]
-    fresh_firefox_cookiefile = settings["fresh_firefox_cookiefile"]
     proxy = settings["proxy"]
     rate_limit = settings["rate_limit"]
 
     if fresh_firefox_cookies:
         browser_spec = ("firefox", fresh_firefox_profile) if fresh_firefox_profile else ("firefox",)
         ydl_opts["cookiesfrombrowser"] = browser_spec
-        if fresh_firefox_cookiefile:
-            ydl_opts["cookiefile"] = fresh_firefox_cookiefile
     else:
         if cookies_from_browser:
             ydl_opts["cookiesfrombrowser"] = _parse_browser_spec(cookies_from_browser)
@@ -260,6 +279,10 @@ def build_ydl_opts(output_dir: Path, settings: DownloadSettings) -> dict[str, ob
         ydl_opts["proxy"] = proxy
     if rate_limit:
         ydl_opts["ratelimit"] = rate_limit
+
+    impersonate = settings.get("impersonate") or os.getenv("YTDLP_IMPERSONATE", "").strip()
+    if impersonate:
+        ydl_opts["impersonate"] = impersonate
 
     return ydl_opts
 
@@ -285,48 +308,48 @@ def download_video(
     _validate_cookie_sources(cookies_from_browser, cookies_file, uses_fresh_firefox_cookies)
 
     if output_dir is None:
-        resolved_output_dir = Path(_resolve_output_dir(None))
+        base_output_dir = Path(_resolve_output_dir(None))
     else:
-        resolved_output_dir = Path(_normalize_output_dir(output_dir))
+        base_output_dir = Path(_normalize_output_dir(output_dir))
 
-    resolved_output_dir = ensure_directory(resolved_output_dir)
+    base_output_dir = ensure_directory(base_output_dir)
 
     print("[INFO] 开始下载视频...")
     print(f"   URL: {url}")
-    print(f"   输出目录: {resolved_output_dir}")
+    print(f"   输出目录: {base_output_dir}")
 
-    resolved_fresh_cookiefile = fresh_firefox_cookiefile
-    created_temp_cookiefile: Path | None = None
-    if uses_fresh_firefox_cookies and resolved_fresh_cookiefile is None:
-        created_temp_cookiefile = _create_temp_cookiefile()
-        resolved_fresh_cookiefile = str(created_temp_cookiefile)
     settings: DownloadSettings = {
         "cookies_from_browser": cookies_from_browser,
         "cookies_file": cookies_file,
         "fresh_firefox_cookies": uses_fresh_firefox_cookies,
         "fresh_firefox_profile": fresh_firefox_profile,
-        "fresh_firefox_cookiefile": resolved_fresh_cookiefile,
+        "fresh_firefox_cookiefile": fresh_firefox_cookiefile,
         "keep_temp_cookies": keep_temp_cookies,
         "proxy": proxy,
         "rate_limit": rate_limit,
         "max_video_height": max_video_height,
-        "output_dir": str(resolved_output_dir),
+        "output_dir": str(base_output_dir),
+        "impersonate": None,
     }
-    ydl_opts = build_ydl_opts(resolved_output_dir, settings)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        initial_opts = build_ydl_opts(base_output_dir, settings)
+        with yt_dlp.YoutubeDL(initial_opts) as ydl:
             print("\n[INFO] 获取视频信息...")
             info = ydl.extract_info(url, download=False)
 
-            title = info.get("title", "Unknown")
-            duration = info.get("duration", 0)
-            video_id = info.get("id", "unknown")
+        resolved_output_dir = ensure_directory(_stable_video_output_dir(base_output_dir, info))
+        title = info.get("title", "Unknown")
+        duration = info.get("duration", 0)
+        video_id = info.get("id", "unknown")
 
-            print(f"   标题: {title}")
-            print(f"   时长: {get_video_duration_display(duration)}")
-            print(f"   视频ID: {video_id}")
+        print(f"   标题: {title}")
+        print(f"   时长: {get_video_duration_display(duration)}")
+        print(f"   视频ID: {video_id}")
+        print(f"   下载目录: {resolved_output_dir}")
 
+        final_opts = build_ydl_opts(resolved_output_dir, settings)
+        with yt_dlp.YoutubeDL(final_opts) as ydl:
             print("\n[INFO] 开始下载...")
             info = ydl.extract_info(url, download=True)
 
@@ -363,8 +386,6 @@ def download_video(
             }
     except Exception as exc:
         raise RuntimeError(_sanitize_error_message(str(exc), proxy)) from exc
-    finally:
-        _cleanup_temp_cookiefile(created_temp_cookiefile, keep_temp_cookies)
 
 
 def _progress_hook(progress: dict) -> None:

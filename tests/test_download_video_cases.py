@@ -15,7 +15,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import download_video
+import download_video  # noqa: E402
 
 
 class DownloadVideoCliTests(unittest.TestCase):
@@ -249,7 +249,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings["output_dir"], str(cli_output_dir))
 
-    def test_env_output_dir_adds_timestamp_child(self):
+    def test_env_output_dir_uses_stable_base_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_output_dir = Path(temp_dir) / "env-out"
             args = download_video.parse_args(
@@ -264,8 +264,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
                 settings = download_video.resolve_download_settings(args)
 
         output_dir = Path(settings["output_dir"])
-        self.assertEqual(output_dir.parent, env_output_dir)
-        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
+        self.assertEqual(output_dir, env_output_dir)
 
     def test_env_output_dir_expands_home_directory(self):
         home_dir = str(Path.home())
@@ -281,8 +280,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
             settings = download_video.resolve_download_settings(args)
 
         output_dir = Path(settings["output_dir"])
-        self.assertEqual(output_dir.parent, Path.home() / "Downloads")
-        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
+        self.assertEqual(output_dir, Path.home() / "Downloads")
 
     def test_cli_output_dir_expands_home_directory(self):
         home_dir = str(Path.home())
@@ -301,7 +299,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
 
         self.assertEqual(Path(settings["output_dir"]), Path.home() / "Downloads")
 
-    def test_default_output_dir_uses_youtube_clips_timestamp(self):
+    def test_default_output_dir_uses_youtube_clips_base_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             args = download_video.parse_args(
                 [
@@ -315,9 +313,87 @@ class DownloadVideoSettingsTests(unittest.TestCase):
                 settings = download_video.resolve_download_settings(args)
 
         output_dir = Path(settings["output_dir"])
-        self.assertEqual(output_dir.parent.name, "youtube-clips")
-        self.assertRegex(output_dir.name, r"^\d{8}_\d{6}$")
-        self.assertNotEqual(output_dir, Path.cwd())
+        self.assertEqual(output_dir, Path("youtube-clips"))
+
+    def test_ydl_opts_enable_resume_and_network_retries(self):
+        settings = {
+            "cookies_from_browser": None,
+            "cookies_file": None,
+            "fresh_firefox_cookies": False,
+            "fresh_firefox_profile": None,
+            "fresh_firefox_cookiefile": None,
+            "keep_temp_cookies": False,
+            "proxy": None,
+            "rate_limit": None,
+            "max_video_height": "1080",
+            "output_dir": "out",
+        }
+
+        options = download_video.build_ydl_opts(Path("out"), settings)
+
+        self.assertTrue(options["continuedl"])
+        self.assertEqual(options["retries"], 20)
+        self.assertEqual(options["fragment_retries"], 20)
+        self.assertEqual(options["file_access_retries"], 10)
+        self.assertEqual(options["socket_timeout"], 30)
+        self.assertEqual(options["http_chunk_size"], 10 * 1024 * 1024)
+
+    def test_ydl_opts_omit_impersonate_when_env_empty(self):
+        settings = {
+            "cookies_from_browser": None,
+            "cookies_file": None,
+            "fresh_firefox_cookies": False,
+            "fresh_firefox_profile": None,
+            "fresh_firefox_cookiefile": None,
+            "keep_temp_cookies": False,
+            "proxy": None,
+            "rate_limit": None,
+            "max_video_height": "1080",
+            "output_dir": "out",
+        }
+
+        with patch.dict(os.environ, {"YTDLP_IMPERSONATE": ""}, clear=True):
+            options = download_video.build_ydl_opts(Path("out"), settings)
+
+        self.assertNotIn("impersonate", options)
+
+    def test_ydl_opts_set_impersonate_from_env(self):
+        settings = {
+            "cookies_from_browser": None,
+            "cookies_file": None,
+            "fresh_firefox_cookies": False,
+            "fresh_firefox_profile": None,
+            "fresh_firefox_cookiefile": None,
+            "keep_temp_cookies": False,
+            "proxy": None,
+            "rate_limit": None,
+            "max_video_height": "1080",
+            "output_dir": "out",
+            "impersonate": None,
+        }
+
+        with patch.dict(os.environ, {"YTDLP_IMPERSONATE": "chrome:windows-10"}, clear=True):
+            options = download_video.build_ydl_opts(Path("out"), settings)
+
+        self.assertEqual(options["impersonate"], "chrome:windows-10")
+
+    def test_env_file_impersonate_sets_ydl_opt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / "download.env"
+            env_path.write_text("YTDLP_IMPERSONATE=chrome:windows-10\n", encoding="utf-8")
+            args = download_video.parse_args(
+                [
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    "--env-file",
+                    str(env_path),
+                ]
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                settings = download_video.resolve_download_settings(args)
+                options = download_video.build_ydl_opts(Path("out"), settings)
+
+        self.assertEqual(options["impersonate"], "chrome:windows-10")
 
     def test_env_file_flag_loads_specified_dotenv(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -399,7 +475,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
         options = download_video.build_ydl_opts(Path("out"), settings)
 
         self.assertEqual(options["cookiesfrombrowser"], ("firefox",))
-        self.assertEqual(options["cookiefile"], str(Path(tempfile.gettempdir()) / "fresh-firefox-cookies.txt"))
+        self.assertNotIn("cookiefile", options)
 
     def test_fresh_firefox_profile_sets_ydl_opts(self):
         settings = {
@@ -418,7 +494,7 @@ class DownloadVideoSettingsTests(unittest.TestCase):
         options = download_video.build_ydl_opts(Path("out"), settings)
 
         self.assertEqual(options["cookiesfrombrowser"], ("firefox", "work"))
-        self.assertEqual(options["cookiefile"], str(Path(tempfile.gettempdir()) / "fresh-firefox-cookies.txt"))
+        self.assertNotIn("cookiefile", options)
 
     def test_none_values_omitted_from_ydl_opts(self):
         settings = {
@@ -633,7 +709,7 @@ class DownloadVideoExecutionTests(unittest.TestCase):
 
         self.assertNotIn("secret", str(context.exception))
 
-    def test_download_video_defaults_to_timestamped_youtube_clips_dir(self):
+    def test_download_video_uses_stable_video_id_directory(self):
         class FakeYoutubeDL:
             last_options = None
 
@@ -650,18 +726,18 @@ class DownloadVideoExecutionTests(unittest.TestCase):
             def extract_info(self, url, download=False):
                 if download:
                     self.output_path.write_bytes(b"video")
-                return {"id": "abc123", "title": "Example Video", "duration": 123}
+                return {"id": "abc123", "extractor": "youtube", "title": "Example Video", "duration": 123}
 
             def prepare_filename(self, info):
                 return str(self.output_path)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            default_output_dir = Path(temp_dir) / "youtube-clips" / "20260510_120000"
+            base_output_dir = Path(temp_dir) / "youtube-clips"
             with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                with patch.object(download_video, "_timestamped_output_dir", return_value=str(default_output_dir)):
+                with patch.object(download_video, "_resolve_output_dir", return_value=str(base_output_dir)):
                     download_video.download_video("https://youtube.com/watch?v=Ckt1cj0xjRM")
 
-        self.assertEqual(Path(FakeYoutubeDL.last_options["outtmpl"]).parent, default_output_dir)
+        self.assertEqual(Path(FakeYoutubeDL.last_options["outtmpl"]).parent, base_output_dir / "youtube_abc123")
 
     def test_download_video_returns_dict_contract(self):
         class FakeYoutubeDL:
@@ -708,6 +784,12 @@ class DownloadVideoExecutionTests(unittest.TestCase):
         self.assertEqual(FakeYoutubeDL.last_options["cookiesfrombrowser"], ("firefox",))
         self.assertEqual(FakeYoutubeDL.last_options["proxy"], "http://proxy:8080")
         self.assertEqual(FakeYoutubeDL.last_options["ratelimit"], "50K")
+        self.assertTrue(FakeYoutubeDL.last_options["continuedl"])
+        self.assertEqual(FakeYoutubeDL.last_options["retries"], 20)
+        self.assertEqual(FakeYoutubeDL.last_options["fragment_retries"], 20)
+        self.assertEqual(FakeYoutubeDL.last_options["file_access_retries"], 10)
+        self.assertEqual(FakeYoutubeDL.last_options["socket_timeout"], 30)
+        self.assertEqual(FakeYoutubeDL.last_options["http_chunk_size"], 10 * 1024 * 1024)
         self.assertIn("height<=2160", FakeYoutubeDL.last_options["format"])
 
     def test_download_video_does_not_delete_caller_supplied_cookiefile(self):
@@ -718,7 +800,6 @@ class DownloadVideoExecutionTests(unittest.TestCase):
             class FakeYoutubeDL:
                 def __init__(self, options):
                     self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
-                    self.cookiefile = Path(options["cookiefile"])
 
                 def __enter__(self):
                     return self
@@ -727,8 +808,6 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                     return False
 
                 def extract_info(self, url, download=False):
-                    if not self.cookiefile.exists():
-                        raise AssertionError("caller cookiefile should exist during yt-dlp execution")
                     if download:
                         self.output_path.write_bytes(b"video")
                         self.output_path.with_name("abc123.en.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
@@ -741,22 +820,18 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                 def prepare_filename(self, info):
                     return str(self.output_path)
 
-            with patch.object(download_video, "_create_temp_cookiefile", side_effect=AssertionError("should not create temp cookiefile")):
-                with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                    result = download_video.download_video(
-                        "https://youtube.com/watch?v=Ckt1cj0xjRM",
-                        temp_dir,
-                        fresh_firefox_cookies=True,
-                        fresh_firefox_cookiefile=str(cookie_path),
-                    )
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                result = download_video.download_video(
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    temp_dir,
+                    fresh_firefox_cookies=True,
+                )
 
             self.assertEqual(result["video_id"], "abc123")
             self.assertTrue(cookie_path.exists())
 
-    def test_download_video_cleans_up_temp_cookiefile_by_default(self):
+    def test_download_video_fresh_firefox_uses_cookiesfrombrowser(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_cookie_path = Path(temp_dir) / "fresh-firefox-cookies.txt"
-            temp_cookie_path.write_text("", encoding="utf-8")
 
             class FakeYoutubeDL:
                 last_options = None
@@ -764,7 +839,6 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                 def __init__(self, options):
                     FakeYoutubeDL.last_options = options
                     self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
-                    self.cookiefile = Path(options["cookiefile"])
 
                 def __enter__(self):
                     return self
@@ -773,8 +847,6 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                     return False
 
                 def extract_info(self, url, download=False):
-                    if not self.cookiefile.exists():
-                        raise AssertionError("temp cookiefile should exist during yt-dlp execution")
                     if download:
                         self.output_path.write_bytes(b"video")
                         self.output_path.with_name("abc123.en.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
@@ -787,135 +859,81 @@ class DownloadVideoExecutionTests(unittest.TestCase):
                 def prepare_filename(self, info):
                     return str(self.output_path)
 
-            with patch.object(download_video, "_create_temp_cookiefile", return_value=temp_cookie_path):
-                with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                    result = download_video.download_video(
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                result = download_video.download_video(
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    temp_dir,
+                    fresh_firefox_cookies=True,
+                )
+
+            self.assertEqual(result["video_id"], "abc123")
+            self.assertEqual(FakeYoutubeDL.last_options["cookiesfrombrowser"], ("firefox",))
+            self.assertNotIn("cookiefile", FakeYoutubeDL.last_options)
+
+    def test_download_video_fresh_firefox_with_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+
+            class FakeYoutubeDL:
+                last_options = None
+
+                def __init__(self, options):
+                    FakeYoutubeDL.last_options = options
+                    self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, url, download=False):
+                    if download:
+                        self.output_path.write_bytes(b"video")
+                        self.output_path.with_name("abc123.en.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
+                    return {
+                        "id": "abc123",
+                        "title": "Example Video",
+                        "duration": 123,
+                    }
+
+                def prepare_filename(self, info):
+                    return str(self.output_path)
+
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                result = download_video.download_video(
+                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
+                    temp_dir,
+                    fresh_firefox_cookies=True,
+                    fresh_firefox_profile="work",
+                )
+
+        self.assertEqual(result["video_id"], "abc123")
+        self.assertEqual(FakeYoutubeDL.last_options["cookiesfrombrowser"], ("firefox", "work"))
+        self.assertNotIn("cookiefile", FakeYoutubeDL.last_options)
+
+    def test_download_video_fresh_firefox_error_propagates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+
+            class FakeYoutubeDL:
+                def __init__(self, options):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def extract_info(self, url, download=False):
+                    raise RuntimeError("boom")
+
+            with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    download_video.download_video(
                         "https://youtube.com/watch?v=Ckt1cj0xjRM",
                         temp_dir,
                         fresh_firefox_cookies=True,
                     )
-
-            self.assertEqual(result["video_id"], "abc123")
-            self.assertEqual(FakeYoutubeDL.last_options["cookiesfrombrowser"], ("firefox",))
-            self.assertFalse(temp_cookie_path.exists())
-
-    def test_download_video_keeps_temp_cookiefile_when_requested(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_cookie_path = Path(temp_dir) / "fresh-firefox-cookies.txt"
-            temp_cookie_path.write_text("", encoding="utf-8")
-
-            class FakeYoutubeDL:
-                last_options = None
-
-                def __init__(self, options):
-                    FakeYoutubeDL.last_options = options
-                    self.output_path = Path(options["outtmpl"].replace("%(id)s", "abc123").replace("%(ext)s", "mp4"))
-                    self.cookiefile = Path(options["cookiefile"])
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
-
-                def extract_info(self, url, download=False):
-                    if not self.cookiefile.exists():
-                        raise AssertionError("temp cookiefile should exist during yt-dlp execution")
-                    if download:
-                        self.output_path.write_bytes(b"video")
-                        self.output_path.with_name("abc123.en.vtt").write_text("WEBVTT\n\n", encoding="utf-8")
-                    return {
-                        "id": "abc123",
-                        "title": "Example Video",
-                        "duration": 123,
-                    }
-
-                def prepare_filename(self, info):
-                    return str(self.output_path)
-
-            with patch.object(download_video, "_create_temp_cookiefile", return_value=temp_cookie_path):
-                with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                    with patch("builtins.print") as mock_print:
-                        result = download_video.download_video(
-                            "https://youtube.com/watch?v=Ckt1cj0xjRM",
-                            temp_dir,
-                            fresh_firefox_cookies=True,
-                            fresh_firefox_profile="work",
-                            keep_temp_cookies=True,
-                        )
-
-            warning_output = " ".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
-            self.assertIn("保留临时 cookies 文件", warning_output)
-            self.assertTrue(temp_cookie_path.exists())
-            temp_cookie_path.unlink()
-
-        self.assertEqual(result["video_id"], "abc123")
-        self.assertEqual(FakeYoutubeDL.last_options["cookiesfrombrowser"], ("firefox", "work"))
-
-    def test_cleanup_temp_cookiefile_unlink_error_does_not_mask_download_error(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_cookie_path = Path(temp_dir) / "fresh-firefox-cookies.txt"
-            temp_cookie_path.write_text("", encoding="utf-8")
-            stderr = io.StringIO()
-
-            class FakeYoutubeDL:
-                def __init__(self, options):
-                    self.cookiefile = Path(options["cookiefile"])
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
-
-                def extract_info(self, url, download=False):
-                    if not self.cookiefile.exists():
-                        raise AssertionError("temp cookiefile should exist during yt-dlp execution")
-                    raise RuntimeError("boom")
-
-            with patch.object(download_video, "_create_temp_cookiefile", return_value=temp_cookie_path):
-                with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                    with patch.object(Path, "unlink", side_effect=PermissionError("access denied")):
-                        with patch("sys.stderr", stderr):
-                            with self.assertRaisesRegex(RuntimeError, "boom"):
-                                download_video.download_video(
-                                    "https://youtube.com/watch?v=Ckt1cj0xjRM",
-                                    temp_dir,
-                                    fresh_firefox_cookies=True,
-                                )
-
-            self.assertIn("清理临时 cookies 文件失败", stderr.getvalue())
-
-    def test_download_video_cleans_up_temp_cookiefile_when_download_fails(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_cookie_path = Path(temp_dir) / "fresh-firefox-cookies.txt"
-            temp_cookie_path.write_text("", encoding="utf-8")
-
-            class FakeYoutubeDL:
-                def __init__(self, options):
-                    self.cookiefile = Path(options["cookiefile"])
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
-
-                def extract_info(self, url, download=False):
-                    if not self.cookiefile.exists():
-                        raise AssertionError("temp cookiefile should exist during yt-dlp execution")
-                    raise RuntimeError("boom")
-
-            with patch.object(download_video, "_create_temp_cookiefile", return_value=temp_cookie_path):
-                with patch.object(download_video, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYoutubeDL)):
-                    with self.assertRaisesRegex(RuntimeError, "boom"):
-                        download_video.download_video(
-                            "https://youtube.com/watch?v=Ckt1cj0xjRM",
-                            temp_dir,
-                            fresh_firefox_cookies=True,
-                        )
-
-            self.assertFalse(temp_cookie_path.exists())
 
 
 if __name__ == "__main__":

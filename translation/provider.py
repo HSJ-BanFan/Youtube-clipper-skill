@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import socket
 from typing import Any, Protocol, runtime_checkable
 from urllib import request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 from translation.config import TranslationConfig
+
+REQUEST_TIMEOUT_SECONDS = 120
 
 
 @runtime_checkable
@@ -50,6 +53,7 @@ class OpenAICompatibleProvider(TranslationProvider):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": self.temperature,
+            "stream": False,
         }
         body = json.dumps(payload).encode("utf-8")
         http_request = request.Request(
@@ -63,20 +67,37 @@ class OpenAICompatibleProvider(TranslationProvider):
         )
 
         try:
-            with request.urlopen(http_request, timeout=30) as response:
+            with request.urlopen(http_request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 status = response.status
                 if status < 200 or status >= 300:
                     raise RuntimeError(f"translation provider HTTP {status}")
                 response_body = response.read().decode("utf-8")
         except HTTPError as exc:
             raise RuntimeError(f"translation provider HTTP {exc.code}") from None
+        except (TimeoutError, socket.timeout):
+            raise RuntimeError("translation provider request timed out") from None
         except URLError:
             raise RuntimeError("translation provider request failed") from None
 
-        try:
-            return json.loads(response_body)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("translation provider returned invalid JSON") from exc
+        return _load_response_json(response_body)
+
+
+def _load_response_json(response_body: str) -> Any:
+    decoder = json.JSONDecoder()
+    stripped_body = response_body.lstrip()
+    try:
+        response_data, end_index = decoder.raw_decode(stripped_body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("translation provider returned invalid JSON") from exc
+
+    trailing = stripped_body[end_index:].strip()
+    if trailing and not _is_allowed_sse_trailer(trailing):
+        raise RuntimeError("translation provider returned invalid JSON")
+    return response_data
+
+
+def _is_allowed_sse_trailer(trailing: str) -> bool:
+    return all(line == "data: [DONE]" for line in trailing.splitlines() if line.strip())
 
 
 def _extract_message_content(response_data: Any) -> str:

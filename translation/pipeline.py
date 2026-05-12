@@ -164,10 +164,33 @@ def parse_translation_response(
         translations[cue_id] = translation
 
     try:
-        validate_translations(expected_cues, translations)
+        _validate_batch_translations(expected_cues, translations)
     except ValueError as exc:
         raise ValueError(f"batch_id {batch_id} {exc}") from exc
     return translations
+
+
+def _validate_batch_translations(cues: list[Cue] | tuple[Cue, ...], translations: dict[str, str]) -> None:
+    if len(translations) != len(cues):
+        raise ValueError(f"translation count {len(translations)} does not match cue count {len(cues)}")
+
+    seen_ids: set[str] = set()
+    for cue in cues:
+        if not cue.id.strip():
+            raise ValueError(f"cue index {cue.index} id is empty")
+        if cue.id in seen_ids:
+            raise ValueError(f"duplicate cue id: {cue.id}")
+        seen_ids.add(cue.id)
+        if not cue.start.strip():
+            raise ValueError(f"cue id {cue.id} start is empty")
+        if not cue.end.strip():
+            raise ValueError(f"cue id {cue.id} end is empty")
+        if not cue.source.strip():
+            raise ValueError(f"cue id {cue.id} source is empty")
+        if cue.id not in translations:
+            raise ValueError(f"missing translation for cue id {cue.id}")
+        if not translations[cue.id].strip():
+            raise ValueError(f"translation for cue id {cue.id} is empty")
 
 
 def parse_qa_response(

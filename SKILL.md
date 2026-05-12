@@ -11,7 +11,6 @@ allowed-tools:
   - Bash
   - Glob
   - AskUserQuestion
-model: claude-sonnet-4-5-20250514
 ---
 
 # YouTube 视频智能剪辑工具

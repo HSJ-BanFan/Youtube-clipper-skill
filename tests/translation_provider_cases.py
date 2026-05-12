@@ -79,6 +79,7 @@ class TranslationProviderTests(unittest.TestCase):
         self.assertEqual(captured["body"]["model"], "deepseek-chat")
         self.assertEqual(captured["body"]["temperature"], 0.2)
         self.assertEqual(captured["body"]["messages"], [{"role": "user", "content": "translate this"}])
+        self.assertEqual(captured["body"]["stream"], False)
 
     def test_translate_batch_rejects_non_http_base_url_scheme(self):
         provider = OpenAICompatibleProvider(
@@ -121,6 +122,19 @@ class TranslationProviderTests(unittest.TestCase):
         self.assertNotIn("test-secret", str(error.exception))
         self.assertNotIn("Authorization", str(error.exception))
 
+    def test_translate_batch_timeout_is_reported_without_secret(self):
+        def fake_urlopen(request, timeout=30):
+            raise TimeoutError("timed out")
+
+        provider = OpenAICompatibleProvider(TranslationConfig(api_key="test-secret"))
+
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(RuntimeError, "request timed out") as error:
+                provider.translate_batch("prompt")
+
+        self.assertNotIn("test-secret", str(error.exception))
+        self.assertNotIn("Authorization", str(error.exception))
+
     def test_translate_batch_rejects_missing_message_content(self):
         def fake_urlopen(request, timeout=30):
             return FakeResponse(200, json.dumps({"choices": [{}]}).encode("utf-8"))
@@ -130,6 +144,18 @@ class TranslationProviderTests(unittest.TestCase):
         with patch("translation.provider.request.urlopen", fake_urlopen):
             with self.assertRaisesRegex(RuntimeError, r"choices\[0\]\.message\.content"):
                 provider.translate_batch("prompt")
+
+    def test_translate_batch_accepts_trailing_sse_done_marker(self):
+        def fake_urlopen(request, timeout=30):
+            payload = json.dumps({"choices": [{"message": {"content": "translated"}}]}) + "\ndata: [DONE]"
+            return FakeResponse(200, payload.encode("utf-8"))
+
+        provider = OpenAICompatibleProvider(TranslationConfig(api_key="test-secret"))
+
+        with patch("translation.provider.request.urlopen", fake_urlopen):
+            result = provider.translate_batch("prompt")
+
+        self.assertEqual(result, "translated")
 
     def test_review_suspicious_uses_review_model(self):
         captured = {}
