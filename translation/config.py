@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 
 VALID_MODES = {"fast", "balanced", "publish"}
+VALID_ENGINE_VERSIONS = {"v1", "v2"}
+VALID_FAILURE_MODES = {"strict", "partial", "interactive"}
+VALID_OUTPUT_SCHEMA_VERSIONS = {"v1"}
+VALID_BATCHING_STRATEGY_VERSIONS = {"v1"}
 TARGET_LANG_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
@@ -28,6 +32,16 @@ ENV_MAPPING = {
     "cache_path": "TRANSLATION_CACHE_PATH",
     "glossary_path": "TRANSLATION_GLOSSARY_PATH",
     "qa_mode": "TRANSLATION_QA",
+    "engine_version": "TRANSLATION_ENGINE_VERSION",
+    "structured_output": "TRANSLATION_STRUCTURED_OUTPUT",
+    "failure_mode": "TRANSLATION_FAILURE_MODE",
+    "main_model_alias": "TRANSLATION_MAIN_MODEL_ALIAS",
+    "repair_model_alias": "TRANSLATION_REPAIR_MODEL_ALIAS",
+    "fallback_model_alias": "TRANSLATION_FALLBACK_MODEL_ALIAS",
+    "batch_max_chars": "TRANSLATION_BATCH_MAX_CHARS",
+    "batch_max_cues": "TRANSLATION_BATCH_MAX_CUES",
+    "output_schema_version": "TRANSLATION_OUTPUT_SCHEMA_VERSION",
+    "batching_strategy_version": "TRANSLATION_BATCHING_STRATEGY_VERSION",
 }
 
 
@@ -49,6 +63,16 @@ class TranslationConfig:
     cache_path: str = ".translation_cache.sqlite3"
     glossary_path: str = "glossary.md"
     qa_mode: str = "suspicious-only"
+    engine_version: str = "v1"
+    structured_output: bool = False
+    failure_mode: str = "strict"
+    main_model_alias: str = "main"
+    repair_model_alias: str = "repair"
+    fallback_model_alias: str = "fallback"
+    batch_max_chars: int | None = None
+    batch_max_cues: int | None = None
+    output_schema_version: str = "v1"
+    batching_strategy_version: str = "v1"
     output_dir: str | None = None
     output_path: str | None = None
     dry_run: bool = False
@@ -59,11 +83,18 @@ class TranslationConfig:
             raise ValueError("only openai-compatible is supported in B1-lite")
         object.__setattr__(self, "mode", self.mode.strip().lower())
         object.__setattr__(self, "qa_mode", self.qa_mode.strip().lower())
+        object.__setattr__(self, "engine_version", self.engine_version.strip().lower())
+        object.__setattr__(self, "failure_mode", self.failure_mode.strip().lower())
         if self.qa_mode == "off":
             object.__setattr__(self, "qa_mode", "none")
         if self.mode not in VALID_MODES:
             valid_modes = ", ".join(sorted(VALID_MODES))
             raise ValueError(f"mode must be one of: {valid_modes}")
+        if self.engine_version not in VALID_ENGINE_VERSIONS:
+            valid_engine_versions = ", ".join(sorted(VALID_ENGINE_VERSIONS))
+            raise ValueError(f"engine_version must be one of: {valid_engine_versions}")
+        if not isinstance(self.structured_output, bool):
+            raise ValueError("structured_output must be a boolean")
         if not TARGET_LANG_PATTERN.fullmatch(self.target_lang):
             raise ValueError("target_lang must contain only letters, numbers, and hyphens")
         if self.batch_size <= 0:
@@ -78,6 +109,19 @@ class TranslationConfig:
             raise ValueError("max_retries must be greater than or equal to 0")
         if self.qa_mode not in {"suspicious-only", "none"}:
             raise ValueError("qa_mode must be suspicious-only, none, or off (alias for none)")
+        if self.failure_mode not in VALID_FAILURE_MODES:
+            valid_failure_modes = ", ".join(sorted(VALID_FAILURE_MODES))
+            raise ValueError(f"failure_mode must be one of: {valid_failure_modes}")
+        if self.batch_max_chars is not None and self.batch_max_chars <= 0:
+            raise ValueError("batch_max_chars must be greater than 0 when set")
+        if self.batch_max_cues is not None and self.batch_max_cues <= 0:
+            raise ValueError("batch_max_cues must be greater than 0 when set")
+        if self.output_schema_version not in VALID_OUTPUT_SCHEMA_VERSIONS:
+            valid_output_schema_versions = ", ".join(sorted(VALID_OUTPUT_SCHEMA_VERSIONS))
+            raise ValueError(f"output_schema_version must be one of: {valid_output_schema_versions}")
+        if self.batching_strategy_version not in VALID_BATCHING_STRATEGY_VERSIONS:
+            valid_batching_strategy_versions = ", ".join(sorted(VALID_BATCHING_STRATEGY_VERSIONS))
+            raise ValueError(f"batching_strategy_version must be one of: {valid_batching_strategy_versions}")
         if self.output_dir and self.output_path:
             raise ValueError("output_dir and output_path cannot both be set")
 
@@ -103,6 +147,16 @@ class TranslationConfig:
             "cache_path": self.cache_path,
             "glossary_path": self.glossary_path,
             "qa_mode": self.qa_mode,
+            "engine_version": self.engine_version,
+            "structured_output": self.structured_output,
+            "failure_mode": self.failure_mode,
+            "main_model_alias": self.main_model_alias,
+            "repair_model_alias": self.repair_model_alias,
+            "fallback_model_alias": self.fallback_model_alias,
+            "batch_max_chars": self.batch_max_chars,
+            "batch_max_cues": self.batch_max_cues,
+            "output_schema_version": self.output_schema_version,
+            "batching_strategy_version": self.batching_strategy_version,
             "output_dir": self.output_dir,
             "output_path": self.output_path,
             "dry_run": self.dry_run,
@@ -162,11 +216,18 @@ def _parse_env_file(env_path: Path) -> dict[str, str]:
 
 def _coerce_value(field_name: str, raw_value: str) -> Any:
     try:
-        if field_name in {"batch_size", "context_before", "context_after", "max_retries"}:
+        if field_name in {
+            "batch_size",
+            "context_before",
+            "context_after",
+            "max_retries",
+            "batch_max_chars",
+            "batch_max_cues",
+        }:
             return int(raw_value)
         if field_name == "temperature":
             return float(raw_value)
-        if field_name == "cache_enabled":
+        if field_name in {"cache_enabled", "structured_output"}:
             return _parse_bool(raw_value)
     except ValueError as exc:
         env_name = ENV_MAPPING.get(field_name, field_name)

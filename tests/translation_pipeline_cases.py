@@ -6,9 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from translation.config import TranslationConfig
-from translation.models import Cue, TranslationBatch
+from translation.models import Cue, ErrorType, TranslationBatch
 from translation.pipeline import (
     _build_batch_source_hash,
+    _build_structured_batch_record,
+    _classify_structured_cue_id,
     parse_qa_response,
     parse_translation_response,
     run_translation_pipeline,
@@ -45,6 +47,195 @@ class TranslationResponseParserTests(unittest.TestCase):
     def test_parse_translation_response_rejects_empty_translation(self):
         with self.assertRaisesRegex(ValueError, "cue id 1"):
             parse_translation_response('[{"id":"1","translation":"  "}]', ONE_CUE, batch_id=7)
+
+    def test_parse_translation_response_accepts_minimal_structured_cue_id_array(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        before_cue = Cue(id="before-1", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+        batch_record = _build_structured_batch_record(batch)
+
+        result = parse_translation_response(
+            '[{"cue_id":"target-2","translation":"你好"}]',
+            batch.cues,
+            batch_id=7,
+            translation_id_key="cue_id",
+            batch_record=batch_record,
+        )
+
+        self.assertEqual(result, {"target-2": "你好"})
+
+    def test_parse_translation_response_rejects_missing_required_cue_id(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"translation":"你好"}]',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.MISSING_REQUIRED_CUE_ID)
+
+    def test_parse_translation_response_rejects_invalid_json_on_structured_path(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                "not json",
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.INVALID_JSON)
+
+    def test_parse_translation_response_rejects_schema_mismatch_on_structured_path(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '{"cue_id":"target-2","translation":"你好"}',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.SCHEMA_MISMATCH)
+
+    def test_parse_translation_response_rejects_empty_translation_on_structured_path(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"cue_id":"target-2","translation":"  "}]',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.EMPTY_TRANSLATION)
+
+    def test_parse_translation_response_rejects_duplicate_cue_id(self):
+        first = Cue(id="target-1", index=1, start="00:00:00,000", end="00:00:01,000", source="first")
+        second = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="second")
+        batch = TranslationBatch(batch_id=7, cues=(first, second), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"cue_id":"target-1","translation":"一"},{"cue_id":"target-1","translation":"二"}]',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.DUPLICATE_CUE_ID)
+
+    def test_parse_translation_response_classifies_context_cue_output_violation(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        before_cue = Cue(id="before-1", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"cue_id":"before-1","translation":"上下文"}]',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.CONTEXT_CUE_OUTPUT_VIOLATION)
+
+    def test_parse_translation_response_classifies_invalid_cue_id_for_unknown_non_context_id(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        before_cue = Cue(id="before-1", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"cue_id":"missing-3","translation":"陌生"}]',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.INVALID_CUE_ID)
+
+    def test_parse_translation_response_reconciles_fallback_cue_id_back_to_original_target_id(self):
+        target_cue = Cue(id="shared-id", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        before_cue = Cue(id="shared-id", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+        batch_record = _build_structured_batch_record(batch)
+
+        result = parse_translation_response(
+            '[{"cue_id":"2","translation":"你好"}]',
+            batch.cues,
+            batch_id=7,
+            translation_id_key="cue_id",
+            batch_record=batch_record,
+        )
+
+        self.assertEqual(result, {"shared-id": "你好"})
+
+    def test_parse_translation_response_rebuilds_batch_result_in_original_target_order(self):
+        first_target = Cue(id="shared-a", index=2, start="00:00:02,000", end="00:00:03,000", source="first")
+        second_target = Cue(id="shared-b", index=3, start="00:00:03,000", end="00:00:04,000", source="second")
+        before_cue = Cue(id="shared-a", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(first_target, second_target),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+        batch_record = _build_structured_batch_record(batch)
+
+        result = parse_translation_response(
+            '[{"cue_id":"shared-b","translation":"第二"},{"cue_id":"2","translation":"第一"}]',
+            batch.cues,
+            batch_id=7,
+            translation_id_key="cue_id",
+            batch_record=batch_record,
+        )
+
+        self.assertEqual(list(result.items()), [("shared-a", "第一"), ("shared-b", "第二")])
 
 
 class QAResponseParserTests(unittest.TestCase):
@@ -198,6 +389,52 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("provider_calls: 0", report)
         self.assertIn("cache_misses: 0", report)
 
+    def test_structured_cache_hit_batch_report_marks_cache_hit_true_and_attempt_zero(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"cue_id": "1", "translation": "初始"}])
+
+        class FailingProvider:
+            def __init__(self, config):
+                raise AssertionError("provider should not be constructed on full cache hit")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            first_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out1"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+            second_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out2"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, first_config)
+            with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider):
+                run_translation_pipeline(subtitle_path, second_config)
+
+            report = (root / "out2" / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Batch Results", report)
+        self.assertIn("batch_id: 1 | cue_range: 1-1 | status: success | attempt: 0 | error_type: none | cache_hit: True", report)
+        self.assertRegex(report, r"duration_ms: \d+")
+
     def test_batch_source_hash_changes_when_prompt_context_changes(self):
         current_cue = Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")
         context_cue = Cue(id="2", index=2, start="00:00:02,000", end="00:00:03,000", source="world")
@@ -220,6 +457,237 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             _build_batch_source_hash(prompt_without_context),
             _build_batch_source_hash(prompt_with_context),
         )
+
+    def test_build_structured_batch_record_reuses_stable_cue_ids_across_target_and_context(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        before_cue = Cue(id="before-1", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        after_cue = Cue(id="after-3", index=3, start="00:00:04,000", end="00:00:05,000", source="after")
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(after_cue,),
+        )
+
+        record = _build_structured_batch_record(batch)
+
+        self.assertEqual(tuple(cue.cue_id for cue in record.target_cues), ("target-2",))
+        self.assertEqual(tuple(cue.cue_id for cue in record.context_before), ("before-1",))
+        self.assertEqual(tuple(cue.cue_id for cue in record.context_after), ("after-3",))
+        self.assertEqual(record.target_cues[0].original_index, 2)
+        self.assertEqual(record.context_before[0].original_index, 1)
+        self.assertEqual(record.context_after[0].original_index, 3)
+
+    def test_build_structured_batch_record_falls_back_to_original_index_for_unstable_ids(self):
+        before_cue = Cue(id="same", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        target_cue = Cue(id="same", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(
+            batch_id=8,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+
+        record = _build_structured_batch_record(batch)
+
+        self.assertEqual(tuple(cue.cue_id for cue in record.context_before), ("1",))
+        self.assertEqual(tuple(cue.cue_id for cue in record.target_cues), ("2",))
+
+    def test_classify_structured_cue_id_distinguishes_context_from_unknown(self):
+        before_cue = Cue(id="before-1", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(
+            batch_id=9,
+            cues=(target_cue,),
+            context_before=(before_cue,),
+            context_after=(),
+        )
+
+        record = _build_structured_batch_record(batch)
+
+        self.assertIsNone(_classify_structured_cue_id(record, "target-2"))
+        self.assertEqual(
+            _classify_structured_cue_id(record, "before-1"),
+            ErrorType.CONTEXT_CUE_OUTPUT_VIOLATION,
+        )
+        self.assertEqual(_classify_structured_cue_id(record, "missing-3"), ErrorType.INVALID_CUE_ID)
+
+    def test_default_v1_path_keeps_current_prompt_and_parser_behavior(self):
+        prompt = self._capture_translation_prompt(TranslationConfig(api_key="test-secret", cache_enabled=False))
+
+        self.assertIn("Each item must have id and translation fields.", prompt)
+        self.assertIn('[{"id": "1", "translation": "..."}]', prompt)
+        self.assertNotIn("cue_id", prompt)
+
+    def test_v2_false_keeps_current_prompt_and_parser_behavior(self):
+        prompt = self._capture_translation_prompt(
+            TranslationConfig(
+                api_key="test-secret",
+                cache_enabled=False,
+                engine_version="v2",
+                structured_output=False,
+            )
+        )
+
+        self.assertIn("Each item must have id and translation fields.", prompt)
+        self.assertIn('[{"id": "1", "translation": "..."}]', prompt)
+        self.assertNotIn("cue_id", prompt)
+
+    def test_structured_prompt_activates_only_on_v2_true(self):
+        prompt = self._capture_translation_prompt(
+            TranslationConfig(
+                api_key="test-secret",
+                cache_enabled=False,
+                engine_version="v2",
+                structured_output=True,
+            )
+        )
+
+        self.assertIn("Each item must have cue_id and translation fields.", prompt)
+        self.assertIn('[{"cue_id": "1", "translation": "..."}]', prompt)
+        self.assertIn('Current cues to translate:\n[\n  {\n    "cue_id": "1",', prompt)
+        self.assertNotIn("Each item must have id and translation fields.", prompt)
+
+    def test_v2_true_accepts_structured_cue_id_response(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"cue_id": "1", "translation": "你好"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertIn("你好", translated)
+
+    def test_v2_true_reconciles_fallback_cue_id_before_final_validation(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"cue_id": "1", "translation": "你好"}])
+
+        target_cue = Cue(id="shared-id", index=1, start="00:00:02,000", end="00:00:03,000", source="target")
+        context_cue = Cue(id="shared-id", index=99, start="00:00:00,000", end="00:00:01,000", source="context")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.parse_subtitle_file", return_value=[target_cue]), patch(
+                "translation.pipeline.create_batches",
+                return_value=(
+                    TranslationBatch(
+                        batch_id=1,
+                        cues=(target_cue,),
+                        context_before=(context_cue,),
+                        context_after=(),
+                    ),
+                ),
+            ), patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertIn("你好", translated)
+
+    def test_structured_prompt_uses_fallback_cue_ids_when_original_ids_are_unstable(self):
+        class FakeProvider:
+            prompts: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FakeProvider.prompts.append(prompt)
+                return json.dumps([{"cue_id": "1", "translation": "你好"}])
+
+        target_cue = Cue(id="shared-id", index=1, start="00:00:02,000", end="00:00:03,000", source="target")
+        context_cue = Cue(id="shared-id", index=99, start="00:00:00,000", end="00:00:01,000", source="context")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.parse_subtitle_file", return_value=[target_cue]), patch(
+                "translation.pipeline.create_batches",
+                return_value=(
+                    TranslationBatch(
+                        batch_id=1,
+                        cues=(target_cue,),
+                        context_before=(context_cue,),
+                        context_after=(),
+                    ),
+                ),
+            ), patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+        self.assertIn('Current cues to translate:\n[\n  {\n    "cue_id": "1"', FakeProvider.prompts[0])
+        self.assertIn('Before context:\n[\n  {\n    "cue_id": "99"', FakeProvider.prompts[0])
+        self.assertNotIn('"cue_id": "shared-id"', FakeProvider.prompts[0])
+
+    def _capture_translation_prompt(self, config):
+        class FakeProvider:
+            prompts: list[str] = []
+
+            def __init__(self, provider_config):
+                self.config = provider_config
+
+            def translate_batch(self, prompt):
+                FakeProvider.prompts.append(prompt)
+                if self.config.engine_version == "v2" and self.config.structured_output:
+                    return json.dumps([{"cue_id": "1", "translation": "你好"}])
+                return json.dumps([{"id": "1", "translation": "你好"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config_values = {**config.__dict__, "output_dir": str(output_dir), "batch_size": 1}
+            config = TranslationConfig(**config_values)
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+        return FakeProvider.prompts[0]
 
     def test_cache_disabled_calls_provider_every_run(self):
         class FakeProvider:
@@ -315,6 +783,96 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertEqual(json.loads(cache_rows[0]), [{"id": "1", "translation": "修复后"}])
         self.assertNotIn("not json", cache_rows[0])
 
+    def test_invalid_structured_cache_entry_falls_back_to_provider_and_overwrites_cache(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"cue_id": "1", "translation": "初始"}])
+
+        class FakeProvider:
+            calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FakeProvider.calls += 1
+                return json.dumps([{"cue_id": "1", "translation": "修复后"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            seed_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "seed"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+            recovery_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, seed_config)
+            _overwrite_only_cache_result(cache_path, json.dumps([{"cue_id": "missing", "translation": "坏缓存"}]))
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, recovery_config)
+
+            report = (root / "out" / "translation_report.md").read_text(encoding="utf-8")
+            cache_rows = _read_cache_rows(cache_path)
+
+        self.assertEqual(FakeProvider.calls, 1)
+        self.assertIn("cache_hits: 0", report)
+        self.assertIn("cache_misses: 1", report)
+        self.assertIn("provider_calls: 1", report)
+        self.assertEqual(json.loads(cache_rows[0]), [{"cue_id": "1", "translation": "修复后"}])
+        self.assertNotIn("坏缓存", cache_rows[0])
+
+    def test_invalid_structured_provider_response_does_not_write_cache_entry(self):
+        class BrokenProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"cue_id": "missing", "translation": "坏响应"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            cache_path = root / "translation-cache.sqlite3"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                max_retries=0,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider):
+                with self.assertRaisesRegex(RuntimeError, r"batch_id 1 failed after 1 attempts.*unexpected cue_id missing"):
+                    run_translation_pipeline(subtitle_path, config)
+
+            cache_rows = _read_cache_rows(cache_path)
+
+        self.assertEqual(cache_rows, [])
+
     def test_existing_report_or_context_requires_overwrite_before_provider_construction(self):
         class FailingProvider:
             def __init__(self, config):
@@ -391,6 +949,66 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertEqual(FlakyProvider.attempts, 2)
         self.assertIn("provider_calls: 2", report)
         self.assertIn("retries: 1", report)
+
+    def test_structured_context_cue_output_violation_retries_then_succeeds_without_retry_count_change(self):
+        class FlakyProvider:
+            attempts = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FlakyProvider.attempts += 1
+                if FlakyProvider.attempts == 1:
+                    return json.dumps([{"cue_id": "context-99", "translation": "上下文"}])
+                return json.dumps([{"cue_id": "1", "translation": "目标"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            context_cue = Cue(
+                id="context-99",
+                index=99,
+                start="00:00:09,000",
+                end="00:00:10,000",
+                source="context",
+            )
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                max_retries=1,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FlakyProvider), patch(
+                "translation.pipeline.create_batches",
+                return_value=(
+                    TranslationBatch(
+                        batch_id=1,
+                        cues=(ONE_CUE[0],),
+                        context_before=(context_cue,),
+                        context_after=(),
+                    ),
+                ),
+            ):
+                run_translation_pipeline(subtitle_path, config)
+
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(FlakyProvider.attempts, 2)
+        self.assertIn("provider_calls: 2", report)
+        self.assertIn("retries: 1", report)
+        self.assertIn("## Batch Results", report)
+        self.assertIn(
+            "batch_id: 1 | cue_range: 1-1 | status: success | attempt: 2 | error_type: context_cue_output_violation | cache_hit: False",
+            report,
+        )
+        self.assertRegex(report, r"duration_ms: \d+")
 
     def test_final_batch_failure_reports_batch_id_and_attempt_count(self):
         class BrokenProvider:
