@@ -133,8 +133,21 @@ def _render_batch_entry(entry: MinimalBatchReportEntry) -> str:
     error_type = entry.error_type.value if entry.error_type is not None else "none"
     duration_ms = "none" if entry.duration_ms is None else str(entry.duration_ms)
     final_route_label = entry.final_route_label or "none"
+    parent_batch_id = "none" if entry.parent_batch_id is None else str(entry.parent_batch_id)
+    child_batch_ids = ",".join(str(batch_id) for batch_id in entry.child_batch_ids) if entry.child_batch_ids else "none"
+    split_reason = entry.split_reason or "none"
+    split_attempt = "none" if entry.split_attempt is None else str(entry.split_attempt)
+    split_strategy_version = entry.split_strategy_version or "none"
+    original_target_cue_range = (
+        "none"
+        if entry.original_target_cue_range is None
+        else f"{entry.original_target_cue_range[0]}-{entry.original_target_cue_range[1]}"
+    )
     return (
         f"- batch_id: {entry.batch_id} | cue_range: {cue_range} | status: {entry.state.value} "
         f"| attempt: {attempt} | error_type: {error_type} | cache_hit: {entry.cache_hit} | duration_ms: {duration_ms}"
-        f" | final_route_label: {final_route_label}"
+        f" | final_route_label: {final_route_label} | parent_batch_id: {parent_batch_id}"
+        f" | child_batch_ids: {child_batch_ids} | split_reason: {split_reason}"
+        f" | split_attempt: {split_attempt} | split_strategy_version: {split_strategy_version}"
+        f" | original_target_cue_range: {original_target_cue_range}"
     )

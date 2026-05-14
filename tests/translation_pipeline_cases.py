@@ -2020,6 +2020,257 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         )
         self.assertIn("final_route_label: fallback", report)
 
+    def test_structure_error_can_shrink_after_main_and_fallback_exhaust(self):
+        class ShrinkThenSucceedProvider:
+            calls_by_model: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                ShrinkThenSucceedProvider.calls_by_model.append(self.config.model)
+                if len(ShrinkThenSucceedProvider.calls_by_model) <= 2:
+                    return "not json"
+                if '"cue_id": "1"' in prompt and '"cue_id": "2"' in prompt:
+                    return json.dumps(
+                        [
+                            {"cue_id": "1", "translation": "一"},
+                            {"cue_id": "2", "translation": "二"},
+                        ]
+                    )
+                return json.dumps(
+                    [
+                        {"cue_id": "3", "translation": "三"},
+                        {"cue_id": "4", "translation": "四"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_four_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=4,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", ShrinkThenSucceedProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(ShrinkThenSucceedProvider.calls_by_model, ["main-model", "fallback-model", "main-model", "main-model"])
+        self.assertIn("一", translated)
+        self.assertIn("二", translated)
+        self.assertIn("三", translated)
+        self.assertIn("四", translated)
+        self.assertIn("provider_calls: 4", report)
+        self.assertIn("fallback_provider_calls: 1", report)
+
+    def test_provider_timeout_does_not_trigger_shrink_batch(self):
+        class TimeoutOnlyProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                raise ProviderError(ErrorType.PROVIDER_TIMEOUT, "timed out")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=2,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.split_batch") as split_batch_mock, patch(
+                "translation.pipeline.OpenAICompatibleProvider", TimeoutOnlyProvider
+            ):
+                with self.assertRaisesRegex(RuntimeError, r"batch_id 1.*timed out"):
+                    run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual(split_batch_mock.call_count, 0)
+
+    def test_run_translation_batches_merges_shrunk_child_results_in_parent_order(self):
+        class ShrinkThenSucceedProvider:
+            calls_by_model: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                ShrinkThenSucceedProvider.calls_by_model.append(self.config.model)
+                if len(ShrinkThenSucceedProvider.calls_by_model) <= 2:
+                    return "not json"
+                if '"cue_id": "1"' in prompt and '"cue_id": "2"' in prompt:
+                    return json.dumps(
+                        [
+                            {"cue_id": "1", "translation": "一"},
+                            {"cue_id": "2", "translation": "二"},
+                        ]
+                    )
+                return json.dumps(
+                    [
+                        {"cue_id": "3", "translation": "三"},
+                        {"cue_id": "4", "translation": "四"},
+                    ]
+                )
+
+        batch = TranslationBatch(
+            batch_id=1,
+            cues=(
+                Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="one"),
+                Cue(id="2", index=2, start="00:00:01,000", end="00:00:02,000", source="two"),
+                Cue(id="3", index=3, start="00:00:02,000", end="00:00:03,000", source="three"),
+                Cue(id="4", index=4, start="00:00:03,000", end="00:00:04,000", source="four"),
+            ),
+            context_before=(),
+            context_after=(),
+        )
+        config = TranslationConfig(
+            api_key="test-secret",
+            model="main-model",
+            fallback_model="fallback-model",
+            batch_size=4,
+            context_before=0,
+            context_after=0,
+            max_retries=0,
+            cache_enabled=False,
+            qa_mode="none",
+            engine_version="v2",
+            structured_output=True,
+        )
+
+        with patch("translation.pipeline.OpenAICompatibleProvider", ShrinkThenSucceedProvider):
+            batch_results = _run_translation_batches((batch,), config, "", "", "", "")
+
+        self.assertEqual(batch_results[0].translations, (("1", "一"), ("2", "二"), ("3", "三"), ("4", "四")))
+
+    def test_shrink_batch_stops_after_max_split_attempts(self):
+        from translation.batching import split_batch as real_split_batch
+
+        class AlwaysInvalidProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return "not json"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_eight_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                output_dir=str(output_dir),
+                batch_size=8,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", AlwaysInvalidProvider), patch(
+                "translation.pipeline.split_batch", wraps=real_split_batch
+            ) as split_batch_mock:
+                with self.assertRaisesRegex(RuntimeError, "not valid JSON"):
+                    run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual([call.args[0].batch_id for call in split_batch_mock.call_args_list], [1, 2])
+
+    def test_concurrency_two_keeps_root_batch_order_when_first_batch_shrinks(self):
+        class ConcurrentShrinkProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                current_cues = prompt.split("Current cues to translate:\n", 1)[1].split("\nAfter context:", 1)[0]
+                if '"cue_id": "5"' in current_cues and '"cue_id": "8"' in current_cues:
+                    return json.dumps(
+                        [
+                            {"cue_id": "5", "translation": "五"},
+                            {"cue_id": "6", "translation": "六"},
+                            {"cue_id": "7", "translation": "七"},
+                            {"cue_id": "8", "translation": "八"},
+                        ]
+                    )
+                if '"cue_id": "1"' in current_cues and '"cue_id": "4"' in current_cues:
+                    time.sleep(0.05)
+                    return "not json"
+                if '"cue_id": "1"' in current_cues and '"cue_id": "2"' in current_cues:
+                    time.sleep(0.05)
+                    return json.dumps(
+                        [
+                            {"cue_id": "1", "translation": "一"},
+                            {"cue_id": "2", "translation": "二"},
+                        ]
+                    )
+                if '"cue_id": "3"' in current_cues and '"cue_id": "4"' in current_cues:
+                    return json.dumps(
+                        [
+                            {"cue_id": "3", "translation": "三"},
+                            {"cue_id": "4", "translation": "四"},
+                        ]
+                    )
+                raise AssertionError(f"unexpected prompt: {prompt}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_eight_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                output_dir=str(output_dir),
+                batch_size=4,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+                concurrency=2,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", ConcurrentShrinkProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        positions = [translated.find(text) for text in ("一", "二", "三", "四", "五", "六", "七", "八")]
+        self.assertEqual(positions, sorted(positions))
+        self.assertLess(report.find("batch_id: 1 | cue_range: 1-4"), report.find("batch_id: 2 | cue_range: 5-8"))
+        self.assertIn("provider_calls: 4", report)
+        self.assertIn("child_batch_ids: 3,4", report)
+
     def test_structured_context_cue_output_violation_retries_then_succeeds_without_retry_count_change(self):
         class FlakyProvider:
             attempts = 0
@@ -2327,6 +2578,34 @@ def _write_two_suspicious_cue_srt(temp_dir: Path) -> Path:
     subtitle_path.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
         "2\n00:00:02,000 --> 00:00:03,000\nopen https://example.test/docs and read it\n\n",
+        encoding="utf-8",
+    )
+    return subtitle_path
+
+
+def _write_four_cue_srt(temp_dir: Path) -> Path:
+    subtitle_path = temp_dir / "sample.srt"
+    subtitle_path.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\none\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\ntwo\n\n"
+        "3\n00:00:02,000 --> 00:00:03,000\nthree\n\n"
+        "4\n00:00:03,000 --> 00:00:04,000\nfour\n\n",
+        encoding="utf-8",
+    )
+    return subtitle_path
+
+
+def _write_eight_cue_srt(temp_dir: Path) -> Path:
+    subtitle_path = temp_dir / "sample.srt"
+    subtitle_path.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\none\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\ntwo\n\n"
+        "3\n00:00:02,000 --> 00:00:03,000\nthree\n\n"
+        "4\n00:00:03,000 --> 00:00:04,000\nfour\n\n"
+        "5\n00:00:04,000 --> 00:00:05,000\nfive\n\n"
+        "6\n00:00:05,000 --> 00:00:06,000\nsix\n\n"
+        "7\n00:00:06,000 --> 00:00:07,000\nseven\n\n"
+        "8\n00:00:07,000 --> 00:00:08,000\neight\n\n",
         encoding="utf-8",
     )
     return subtitle_path

@@ -136,6 +136,7 @@ class BatchRecord:
     child_batch_ids: tuple[int, ...] = ()
     split_reason: str | None = None
     split_attempt: int | None = None
+    split_strategy_version: str | None = None
     original_target_cue_range: tuple[int, int] | None = None
 
 
@@ -155,3 +156,9 @@ class MinimalBatchReportEntry:
     failure_mode: FailureMode | None = None
     error_summary: str | None = None
     final_route_label: str | None = None
+    parent_batch_id: int | None = None
+    child_batch_ids: tuple[int, ...] = ()
+    split_reason: str | None = None
+    split_attempt: int | None = None
+    split_strategy_version: str | None = None
+    original_target_cue_range: tuple[int, int] | None = None
