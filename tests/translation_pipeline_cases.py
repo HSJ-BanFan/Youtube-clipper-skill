@@ -531,6 +531,20 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         )
         self.assertEqual(_classify_structured_cue_id(record, "missing-3"), ErrorType.INVALID_CUE_ID)
 
+    def test_build_structured_batch_record_rejects_generated_cue_id_collision(self):
+        stable_cue = Cue(id="2", index=1, start="00:00:00,000", end="00:00:01,000", source="stable")
+        target_cue = Cue(id="same", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        after_cue = Cue(id="same", index=3, start="00:00:04,000", end="00:00:05,000", source="after")
+        batch = TranslationBatch(
+            batch_id=10,
+            cues=(target_cue,),
+            context_before=(stable_cue,),
+            context_after=(after_cue,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "generated non-unique structured cue_ids"):
+            _build_structured_batch_record(batch)
+
     def test_default_v1_path_keeps_current_prompt_and_parser_behavior(self):
         prompt = self._capture_translation_prompt(TranslationConfig(api_key="test-secret", cache_enabled=False))
 

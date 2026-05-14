@@ -519,6 +519,10 @@ def _build_structured_batch_record(batch: TranslationBatch) -> BatchRecord:
             note=cue.note,
         )
 
+    generated_cue_ids = {record.cue_id for record in cue_records.values()}
+    if len(generated_cue_ids) != len(cue_records):
+        raise ValueError(f"batch_id {batch.batch_id} generated non-unique structured cue_ids")
+
     return BatchRecord(
         batch_id=batch.batch_id,
         target_cues=tuple(cue_records[cue] for cue in batch.cues),
