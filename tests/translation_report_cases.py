@@ -7,7 +7,7 @@ from pathlib import Path
 from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
-from translation.models import PipelineResult, TranslationOutputPaths
+from translation.models import BatchState, MinimalBatchReportEntry, PipelineResult, TranslationOutputPaths
 from translation.qa import QAIssue
 from translation.report import QAStats, TranslationStats, write_translation_report
 
@@ -57,6 +57,7 @@ class TranslationReportTests(unittest.TestCase):
             stats = TranslationStats(
                 total_batches=5,
                 provider_calls=4,
+                fallback_provider_calls=1,
                 cache_hits=1,
                 cache_misses=4,
                 retries=2,
@@ -106,6 +107,7 @@ class TranslationReportTests(unittest.TestCase):
                 "context_hash": "context-hash",
                 "total_batches": "5",
                 "provider_calls": "4",
+                "fallback_provider_calls": "1",
                 "cache_hits": "1",
                 "cache_misses": "4",
                 "retries": "2",
@@ -183,6 +185,55 @@ class TranslationReportTests(unittest.TestCase):
         self.assertIn("- 2 | medium | url count mismatch", report)
         self.assertNotIn("sk-should-not-appear", report)
         self.assertNotIn("raw", report.lower())
+
+    def test_write_translation_report_renders_final_route_label_in_batch_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_paths = TranslationOutputPaths(
+                output_dir=root / "translated",
+                translated_srt=root / "translated" / "translated.zh-CN.srt",
+                bilingual_srt=root / "translated" / "bilingual.srt",
+                translation_report=root / "translated" / "translation_report.md",
+                global_context=root / "translated" / "global_context.md",
+            )
+            result = PipelineResult(
+                input_path=root / "input.en.srt",
+                input_format="srt",
+                output_format="srt",
+                output_paths=output_paths,
+                dry_run=False,
+                cue_count=1,
+                provider_called=True,
+            )
+            config = TranslationConfig(api_key="sk-should-not-appear")
+            stats = TranslationStats(
+                total_batches=1,
+                provider_calls=2,
+                fallback_provider_calls=1,
+                batch_entries=[
+                    MinimalBatchReportEntry(
+                        batch_id=1,
+                        state=BatchState.SUCCESS,
+                        cue_count=1,
+                        attempts=2,
+                        cache_hit=False,
+                        cue_range=(1, 1),
+                        attempt=2,
+                        duration_ms=12,
+                        final_route_label="fallback",
+                    )
+                ],
+            )
+            glossary = Glossary(path=None, text="", hash="", exists=False, truncated=False)
+            context = GlobalContext(text="", hash="")
+            report_path = root / "translated" / "translation_report.md"
+
+            write_translation_report(report_path, result, config, stats, glossary, context)
+
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("fallback_provider_calls: 1", report)
+        self.assertIn("final_route_label: fallback", report)
 
 
 if __name__ == "__main__":

@@ -114,6 +114,27 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertEqual(safe["concurrency"], 3)
 
+    def test_fallback_model_defaults_to_none(self):
+        config = TranslationConfig()
+
+        self.assertIsNone(config.fallback_model)
+
+    def test_env_fallback_model_loads(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={"TRANSLATION_FALLBACK_MODEL": "fallback-model"},
+        )
+
+        self.assertEqual(config.fallback_model, "fallback-model")
+
+    def test_safe_config_output_includes_fallback_model(self):
+        config = TranslationConfig(fallback_model="fallback-model")
+
+        safe = config.to_safe_dict()
+
+        self.assertEqual(safe["fallback_model"], "fallback-model")
+
     def test_concurrency_rejects_non_positive_values(self):
         with self.assertRaisesRegex(ValueError, "concurrency must be greater than 0"):
             TranslationConfig(concurrency=0)

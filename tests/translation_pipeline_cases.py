@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from translation.config import TranslationConfig
 from translation.models import BatchState, Cue, ErrorType, MinimalBatchReportEntry, TranslationBatch
@@ -22,6 +23,7 @@ from translation.pipeline import (
     run_translation_pipeline,
 )
 from translation.prompts import build_translation_prompt
+from translation.provider import OpenAICompatibleProvider, ProviderError
 
 
 ONE_CUE = [Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")]
@@ -303,6 +305,67 @@ class QAResponseParserTests(unittest.TestCase):
             with self.subTest(response=response):
                 with self.assertRaisesRegex(RuntimeError, "QA response"):
                     parse_qa_response(response, candidates)
+
+
+class TranslationProviderErrorTests(unittest.TestCase):
+    def test_provider_timeout_is_classified(self):
+        config = TranslationConfig(api_key="test-secret", base_url="https://example.test/v1")
+        provider = OpenAICompatibleProvider(config)
+
+        with patch("translation.provider.request.urlopen", side_effect=TimeoutError):
+            with self.assertRaises(ProviderError) as raised:
+                provider.translate_batch("hello")
+
+        self.assertEqual(raised.exception.error_type, ErrorType.PROVIDER_TIMEOUT)
+
+    def test_provider_http_5xx_is_classified(self):
+        config = TranslationConfig(api_key="test-secret", base_url="https://example.test/v1")
+        provider = OpenAICompatibleProvider(config)
+        error = HTTPError(
+            url="https://example.test/v1/chat/completions",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=None,
+        )
+
+        with patch("translation.provider.request.urlopen", side_effect=error):
+            with self.assertRaises(ProviderError) as raised:
+                provider.translate_batch("hello")
+
+        self.assertEqual(raised.exception.error_type, ErrorType.PROVIDER_HTTP_5XX)
+
+    def test_provider_request_failure_is_classified(self):
+        config = TranslationConfig(api_key="test-secret", base_url="https://example.test/v1")
+        provider = OpenAICompatibleProvider(config)
+
+        with patch("translation.provider.request.urlopen", side_effect=URLError("boom")):
+            with self.assertRaises(ProviderError) as raised:
+                provider.translate_batch("hello")
+
+        self.assertEqual(raised.exception.error_type, ErrorType.PROVIDER_REQUEST_FAILED)
+
+    def test_provider_missing_choices_is_classified(self):
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices": []}'
+
+        config = TranslationConfig(api_key="test-secret", base_url="https://example.test/v1")
+        provider = OpenAICompatibleProvider(config)
+
+        with patch("translation.provider.request.urlopen", return_value=FakeResponse()):
+            with self.assertRaises(ProviderError) as raised:
+                provider.translate_batch("hello")
+
+        self.assertEqual(raised.exception.error_type, ErrorType.PROVIDER_MISSING_CHOICES)
 
 
 class TranslationPipelineExecutionTests(unittest.TestCase):
@@ -1723,6 +1786,239 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertEqual(FlakyProvider.attempts, 2)
         self.assertIn("provider_calls: 2", report)
         self.assertIn("retries: 1", report)
+
+    def test_provider_transport_errors_retry_then_fallback_without_cache_write(self):
+        error_types = (
+            ErrorType.PROVIDER_TIMEOUT,
+            ErrorType.PROVIDER_HTTP_5XX,
+            ErrorType.PROVIDER_REQUEST_FAILED,
+            ErrorType.PROVIDER_MISSING_CHOICES,
+        )
+
+        for error_type in error_types:
+            with self.subTest(error_type=error_type.value):
+                class FakeProvider:
+                    calls_by_model: list[str] = []
+
+                    def __init__(self, config):
+                        self.config = config
+                        self.error_type = error_type
+
+                    def translate_batch(self, prompt):
+                        FakeProvider.calls_by_model.append(self.config.model)
+                        if self.config.model == "main-model":
+                            raise ProviderError(self.error_type, f"main failed: {self.error_type.value}")
+                        return json.dumps(
+                            [
+                                {"id": "1", "translation": "你好"},
+                                {"id": "2", "translation": "世界"},
+                            ]
+                        )
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    subtitle_path = _write_two_cue_srt(root)
+                    output_dir = root / "out"
+                    cache_path = root / "translation-cache.sqlite3"
+                    config = TranslationConfig(
+                        api_key="test-secret",
+                        model="main-model",
+                        fallback_model="fallback-model",
+                        output_dir=str(output_dir),
+                        batch_size=2,
+                        max_retries=1,
+                        cache_path=str(cache_path),
+                        qa_mode="none",
+                    )
+
+                    with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                        run_translation_pipeline(subtitle_path, config)
+
+                    report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+                    translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+                    cache_rows = _read_cache_rows(cache_path) if cache_path.exists() else []
+
+                self.assertEqual(FakeProvider.calls_by_model, ["main-model", "main-model", "fallback-model"])
+                self.assertIn("你好", translated)
+                self.assertIn("世界", translated)
+                self.assertIn("provider_calls: 3", report)
+                self.assertIn("fallback_provider_calls: 1", report)
+                self.assertIn("final_route_label: fallback", report)
+                self.assertEqual(cache_rows, [])
+
+    def test_invalid_json_retries_then_falls_back_without_cache_write(self):
+        class FakeProvider:
+            calls_by_model: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FakeProvider.calls_by_model.append(self.config.model)
+                if self.config.model == "main-model":
+                    return "not json"
+                return json.dumps(
+                    [
+                        {"id": "1", "translation": "你好"},
+                        {"id": "2", "translation": "世界"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            cache_path = root / "translation-cache.sqlite3"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=2,
+                max_retries=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+            cache_rows = _read_cache_rows(cache_path) if cache_path.exists() else []
+
+        self.assertEqual(FakeProvider.calls_by_model, ["main-model", "main-model", "fallback-model"])
+        self.assertIn("provider_calls: 3", report)
+        self.assertIn("fallback_provider_calls: 1", report)
+        self.assertIn("final_route_label: fallback", report)
+        self.assertEqual(cache_rows, [])
+
+    def test_schema_mismatch_retries_on_main_and_does_not_fallback(self):
+        class FakeProvider:
+            calls_by_model: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FakeProvider.calls_by_model.append(self.config.model)
+                return json.dumps({"cue_id": "1", "translation": "你好"})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=1,
+                max_retries=1,
+                cache_enabled=False,
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                with self.assertRaisesRegex(RuntimeError, r"batch_id 1.*2 attempts"):
+                    run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual(FakeProvider.calls_by_model, ["main-model", "main-model"])
+
+    def test_fallback_failure_still_fails_pipeline(self):
+        class FakeProvider:
+            calls_by_model: list[str] = []
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                FakeProvider.calls_by_model.append(self.config.model)
+                if self.config.model == "main-model":
+                    raise ProviderError(ErrorType.PROVIDER_TIMEOUT, "main timed out")
+                raise ProviderError(ErrorType.PROVIDER_HTTP_5XX, "fallback failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            cache_path = root / "translation-cache.sqlite3"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=1,
+                max_retries=0,
+                cache_path=str(cache_path),
+                qa_mode="none",
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                with self.assertRaisesRegex(RuntimeError, r"batch_id 1.*fallback failed"):
+                    run_translation_pipeline(subtitle_path, config)
+
+            cache_rows = _read_cache_rows(cache_path) if cache_path.exists() else []
+
+        self.assertEqual(FakeProvider.calls_by_model, ["main-model", "fallback-model"])
+        self.assertEqual(cache_rows, [])
+        self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+
+    def test_concurrency_two_keeps_output_order_and_fallback_stats_stable(self):
+        class FakeProvider:
+            calls_by_model: list[tuple[str, str]] = []
+            lock = threading.Lock()
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                current_cues = prompt.split("Current cues to translate:", 1)[1].split("After context:", 1)[0]
+                cue_id = "1" if '"id": "1"' in current_cues else "2"
+                with FakeProvider.lock:
+                    FakeProvider.calls_by_model.append((self.config.model, cue_id))
+                if self.config.model == "main-model":
+                    raise ProviderError(ErrorType.PROVIDER_REQUEST_FAILED, f"main failed for {cue_id}")
+                if cue_id == "1":
+                    time.sleep(0.05)
+                    return json.dumps([{"id": "1", "translation": "你好"}])
+                return json.dumps([{"id": "2", "translation": "世界"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                model="main-model",
+                fallback_model="fallback-model",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=2,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertIn("你好", translated)
+        self.assertIn("世界", translated)
+        self.assertLess(translated.find("你好"), translated.find("世界"))
+        self.assertIn("provider_calls: 4", report)
+        self.assertIn("fallback_provider_calls: 2", report)
+        self.assertLess(
+            report.find("batch_id: 1 | cue_range: 1-1"),
+            report.find("batch_id: 2 | cue_range: 2-2"),
+        )
+        self.assertIn("final_route_label: fallback", report)
 
     def test_structured_context_cue_output_violation_retries_then_succeeds_without_retry_count_change(self):
         class FlakyProvider:
