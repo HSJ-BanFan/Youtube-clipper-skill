@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Lock
 from time import perf_counter
 
 from translation.batching import create_batches
@@ -29,6 +32,30 @@ from translation.subtitles import (
     write_bilingual_srt,
     write_translated_srt,
 )
+
+
+@dataclass(frozen=True)
+class BatchStatsDelta:
+    provider_calls: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    retries: int = 0
+
+
+@dataclass(frozen=True)
+class BatchExecutionResult:
+    translations: tuple[tuple[str, str], ...]
+    stats_delta: BatchStatsDelta
+    batch_entry: MinimalBatchReportEntry
+
+
+class BatchExecutionFailed(RuntimeError):
+    def __init__(self, error: RuntimeError) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+_CACHE_ACCESS_LOCK = Lock()
 
 
 def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfig) -> PipelineResult:
@@ -62,124 +89,13 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     batches = create_batches(cues, config.batch_size, config.context_before, config.context_after)
     stats = TranslationStats(total_batches=len(batches))
-    cache = TranslationCache(config.cache_path) if config.cache_enabled else None
-    provider: TranslationProvider | None = None
     all_translations: dict[str, str] = {}
 
-    try:
-        for batch in batches:
-            batch_started_at = perf_counter()
-            translation_id_key = "id"
-            structured_batch_record: BatchRecord | None = None
-            if config.engine_version == "v2" and config.structured_output:
-                translation_id_key = "cue_id"
-                structured_batch_record = _build_structured_batch_record(batch)
-                prompt = build_structured_translation_prompt(
-                    batch,
-                    config.target_lang,
-                    glossary.text,
-                    global_context.text,
-                    batch_record=structured_batch_record,
-                )
-            else:
-                prompt = build_translation_prompt(
-                    batch,
-                    config.target_lang,
-                    glossary.text,
-                    global_context.text,
-                )
-            batch_source_hash = _build_batch_source_hash(prompt)
-            cache_key = build_batch_cache_key(
-                config.engine_version,
-                config.structured_output,
-                config.provider,
-                config.base_url,
-                config.model,
-                config.main_model_alias,
-                config.target_lang,
-                PROMPT_VERSION,
-                config.output_schema_version,
-                config.batching_strategy_version,
-                glossary.hash,
-                global_context.hash,
-                batch_source_hash,
-            )
-            cached_json = cache.get(cache_key) if cache is not None else None
-            if cached_json is not None:
-                try:
-                    batch_translations = parse_translation_response(
-                        cached_json,
-                        batch.cues,
-                        batch.batch_id,
-                        translation_id_key=translation_id_key,
-                        batch_record=structured_batch_record,
-                    )
-                except ValueError:
-                    stats.cache_misses += 1
-                else:
-                    stats.cache_hits += 1
-                    all_translations.update(batch_translations)
-                    _append_batch_report_entry(
-                        stats,
-                        batch,
-                        BatchState.SUCCESS,
-                        0,
-                        True,
-                        None,
-                        _duration_ms(batch_started_at),
-                    )
-                    continue
-            elif cache is not None:
-                stats.cache_misses += 1
+    batch_results = _run_translation_batches(batches, config, glossary.text, glossary.hash, global_context.text, global_context.hash)
+    for batch_result in batch_results:
+        _merge_batch_execution_result(stats, all_translations, batch_result)
 
-            if provider is None:
-                provider = OpenAICompatibleProvider(config)
-            retries_before = stats.retries
-            response_text, batch_translations, batch_error_type = _translate_batch_with_retries(
-                provider,
-                prompt,
-                batch,
-                config,
-                stats,
-                translation_id_key=translation_id_key,
-                batch_record=structured_batch_record,
-            )
-            attempts_used = stats.retries - retries_before + 1
-            if cache is not None:
-                cache.set(
-                    CacheEntry(
-                        cache_key=cache_key,
-                        engine_version=config.engine_version,
-                        structured_output=config.structured_output,
-                        provider=config.provider,
-                        base_url=config.base_url,
-                        model=config.model,
-                        main_model_alias=config.main_model_alias,
-                        target_lang=config.target_lang,
-                        prompt_version=PROMPT_VERSION,
-                        output_schema_version=config.output_schema_version,
-                        batching_strategy_version=config.batching_strategy_version,
-                        glossary_hash=glossary.hash,
-                        context_hash=global_context.hash,
-                        batch_source_hash=batch_source_hash,
-                        result_json=response_text,
-                    )
-                )
-            all_translations.update(batch_translations)
-            _append_batch_report_entry(
-                stats,
-                batch,
-                BatchState.SUCCESS,
-                attempts_used,
-                False,
-                batch_error_type,
-                _duration_ms(batch_started_at),
-            )
-    finally:
-        if cache is not None:
-            cache.close()
-
-    final_translations = _run_suspicious_qa(cues, all_translations, config, glossary.text, global_context.text, provider, stats)
+    final_translations = _run_suspicious_qa(cues, all_translations, config, glossary.text, global_context.text, None, stats)
     validate_translations(cues, final_translations)
     write_translated_srt(cues, final_translations, output_paths.translated_srt)
     write_bilingual_srt(cues, final_translations, output_paths.bilingual_srt)
@@ -198,6 +114,256 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     )
     write_translation_report(output_paths.translation_report, result, config, stats, glossary, global_context)
     return result
+
+
+def _run_translation_batches(
+    batches: list[TranslationBatch] | tuple[TranslationBatch, ...],
+    config: TranslationConfig,
+    glossary_text: str,
+    glossary_hash: str,
+    global_context_text: str,
+    global_context_hash: str,
+) -> list[BatchExecutionResult]:
+    if config.concurrency == 1:
+        ordered_results: list[BatchExecutionResult] = []
+        for batch in batches:
+            try:
+                ordered_results.append(
+                    _execute_translation_batch(
+                        batch,
+                        config,
+                        glossary_text,
+                        glossary_hash,
+                        global_context_text,
+                        global_context_hash,
+                    )
+                )
+            except BatchExecutionFailed as failure:
+                _raise_batch_runtime_error(failure.error)
+        return ordered_results
+
+    cancellation_event = Event()
+    executor = ThreadPoolExecutor(max_workers=min(config.concurrency, len(batches)))
+    wait_for_shutdown = True
+    try:
+        futures = {
+            executor.submit(
+                _execute_translation_batch,
+                batch,
+                config,
+                glossary_text,
+                glossary_hash,
+                global_context_text,
+                global_context_hash,
+                cancellation_event,
+            ): batch_index
+            for batch_index, batch in enumerate(batches)
+        }
+        ordered_results: list[BatchExecutionResult | None] = [None] * len(futures)
+        for future in as_completed(futures):
+            batch_index = futures[future]
+            try:
+                ordered_results[batch_index] = future.result()
+            except BatchExecutionFailed as failure:
+                cancellation_event.set()
+                wait_for_shutdown = False
+                for pending_future in futures:
+                    if pending_future is not future:
+                        pending_future.cancel()
+                _raise_batch_runtime_error(failure.error)
+            except Exception:
+                cancellation_event.set()
+                wait_for_shutdown = False
+                for pending_future in futures:
+                    if pending_future is not future:
+                        pending_future.cancel()
+                raise
+        if any(result is None for result in ordered_results):
+            raise RuntimeError("batch result was None -- this should not happen")
+        return [result for result in ordered_results if result is not None]
+    finally:
+        executor.shutdown(wait=wait_for_shutdown, cancel_futures=not wait_for_shutdown)
+
+
+def _execute_translation_batch(
+    batch: TranslationBatch,
+    config: TranslationConfig,
+    glossary_text: str,
+    glossary_hash: str,
+    global_context_text: str,
+    global_context_hash: str,
+    cancellation_event: Event | None = None,
+) -> BatchExecutionResult:
+    batch_started_at = perf_counter()
+    translation_id_key = "id"
+    structured_batch_record: BatchRecord | None = None
+    if config.engine_version == "v2" and config.structured_output:
+        translation_id_key = "cue_id"
+        structured_batch_record = _build_structured_batch_record(batch)
+        prompt = build_structured_translation_prompt(
+            batch,
+            config.target_lang,
+            glossary_text,
+            global_context_text,
+            batch_record=structured_batch_record,
+        )
+    else:
+        prompt = build_translation_prompt(
+            batch,
+            config.target_lang,
+            glossary_text,
+            global_context_text,
+        )
+    batch_source_hash = _build_batch_source_hash(prompt)
+    cache_key = build_batch_cache_key(
+        config.engine_version,
+        config.structured_output,
+        config.provider,
+        config.base_url,
+        config.model,
+        config.main_model_alias,
+        config.target_lang,
+        PROMPT_VERSION,
+        config.output_schema_version,
+        config.batching_strategy_version,
+        glossary_hash,
+        global_context_hash,
+        batch_source_hash,
+    )
+    local_stats = TranslationStats()
+
+    cached_json = _read_cached_response(config, cache_key)
+    if cached_json is not None:
+        try:
+            batch_translations = parse_translation_response(
+                cached_json,
+                batch.cues,
+                batch.batch_id,
+                translation_id_key=translation_id_key,
+                batch_record=structured_batch_record,
+            )
+        except ValueError:
+            local_stats.cache_misses += 1
+        else:
+            local_stats.cache_hits += 1
+            ordered_translations = tuple((cue.id, batch_translations[cue.id]) for cue in batch.cues)
+            return BatchExecutionResult(
+                translations=ordered_translations,
+                stats_delta=_stats_delta_from_stats(local_stats),
+                batch_entry=MinimalBatchReportEntry(
+                    batch_id=batch.batch_id,
+                    state=BatchState.SUCCESS,
+                    cue_count=len(batch.cues),
+                    attempts=0,
+                    cache_hit=True,
+                    cue_range=(batch.cues[0].index, batch.cues[-1].index),
+                    attempt=0,
+                    error_type=None,
+                    duration_ms=_duration_ms(batch_started_at),
+                ),
+            )
+    elif config.cache_enabled:
+        local_stats.cache_misses += 1
+
+    provider = OpenAICompatibleProvider(config)
+    try:
+        response_text, batch_translations, batch_error_type = _translate_batch_with_retries(
+            provider,
+            prompt,
+            batch,
+            config,
+            local_stats,
+            translation_id_key=translation_id_key,
+            batch_record=structured_batch_record,
+        )
+    except RuntimeError as error:
+        raise BatchExecutionFailed(error) from error
+
+    if cancellation_event is None or not cancellation_event.is_set():
+        _write_cached_response(
+            config,
+            CacheEntry(
+                cache_key=cache_key,
+                engine_version=config.engine_version,
+                structured_output=config.structured_output,
+                provider=config.provider,
+                base_url=config.base_url,
+                model=config.model,
+                main_model_alias=config.main_model_alias,
+                target_lang=config.target_lang,
+                prompt_version=PROMPT_VERSION,
+                output_schema_version=config.output_schema_version,
+                batching_strategy_version=config.batching_strategy_version,
+                glossary_hash=glossary_hash,
+                context_hash=global_context_hash,
+                batch_source_hash=batch_source_hash,
+                result_json=response_text,
+            ),
+        )
+
+    attempts_used = local_stats.retries + 1
+    ordered_translations = tuple((cue.id, batch_translations[cue.id]) for cue in batch.cues)
+    return BatchExecutionResult(
+        translations=ordered_translations,
+        stats_delta=_stats_delta_from_stats(local_stats),
+        batch_entry=MinimalBatchReportEntry(
+            batch_id=batch.batch_id,
+            state=BatchState.SUCCESS,
+            cue_count=len(batch.cues),
+            attempts=attempts_used,
+            cache_hit=False,
+            cue_range=(batch.cues[0].index, batch.cues[-1].index),
+            attempt=attempts_used,
+            error_type=batch_error_type,
+            duration_ms=_duration_ms(batch_started_at),
+        ),
+    )
+
+
+def _read_cached_response(config: TranslationConfig, cache_key: str) -> str | None:
+    if not config.cache_enabled:
+        return None
+    with _CACHE_ACCESS_LOCK:
+        with TranslationCache(config.cache_path) as cache:
+            return cache.get(cache_key)
+
+
+def _write_cached_response(config: TranslationConfig, entry: CacheEntry) -> None:
+    if not config.cache_enabled:
+        return
+    with _CACHE_ACCESS_LOCK:
+        with TranslationCache(config.cache_path) as cache:
+            cache.set(entry)
+
+
+def _merge_batch_execution_result(
+    stats: TranslationStats,
+    all_translations: dict[str, str],
+    batch_result: BatchExecutionResult,
+) -> None:
+    _merge_stats_delta(stats, batch_result.stats_delta)
+    all_translations.update(batch_result.translations)
+    stats.batch_entries.append(batch_result.batch_entry)
+
+
+def _merge_stats_delta(stats: TranslationStats, stats_delta: BatchStatsDelta) -> None:
+    stats.provider_calls += stats_delta.provider_calls
+    stats.cache_hits += stats_delta.cache_hits
+    stats.cache_misses += stats_delta.cache_misses
+    stats.retries += stats_delta.retries
+
+
+def _stats_delta_from_stats(stats: TranslationStats) -> BatchStatsDelta:
+    return BatchStatsDelta(
+        provider_calls=stats.provider_calls,
+        cache_hits=stats.cache_hits,
+        cache_misses=stats.cache_misses,
+        retries=stats.retries,
+    )
+
+
+def _raise_batch_runtime_error(error: RuntimeError) -> None:
+    raise RuntimeError(str(error)) from error
 
 
 class StructuredTranslationError(ValueError):
@@ -411,31 +577,6 @@ def build_output_paths(input_path: Path, config: TranslationConfig) -> Translati
     )
 
 
-def _append_batch_report_entry(
-    stats: TranslationStats,
-    batch: TranslationBatch,
-    state: BatchState,
-    attempt: int,
-    cache_hit: bool,
-    error_type: ErrorType | None,
-    duration_ms: int,
-) -> None:
-    stats.batch_entries.append(
-        MinimalBatchReportEntry(
-            batch_id=batch.batch_id,
-            state=state,
-            cue_count=len(batch.cues),
-            attempts=attempt,
-            cache_hit=cache_hit,
-            cue_range=(batch.cues[0].index, batch.cues[-1].index),
-            attempt=attempt,
-            error_type=error_type,
-            duration_ms=duration_ms,
-        )
-    )
-
-
-
 def _duration_ms(started_at: float) -> int:
     return max(int((perf_counter() - started_at) * 1000), 0)
 
@@ -504,7 +645,6 @@ def _translate_batch_with_retries(
             last_error = exc
             last_error_type = getattr(exc, "error_type", None)
     stats.retries += max(attempts - 1, 0)
-    stats.failed_batches += 1
     detail = f": {last_error}" if last_error is not None else ""
     raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
 
