@@ -27,6 +27,7 @@ class QAStats:
 class TranslationStats:
     total_batches: int = 0
     provider_calls: int = 0
+    fallback_provider_calls: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
     retries: int = 0
@@ -73,6 +74,7 @@ def write_translation_report(
         "context_hash": context.hash,
         "total_batches": stats.total_batches,
         "provider_calls": stats.provider_calls,
+        "fallback_provider_calls": stats.fallback_provider_calls,
         "cache_hits": stats.cache_hits,
         "cache_misses": stats.cache_misses,
         "retries": stats.retries,
@@ -130,7 +132,9 @@ def _render_batch_entry(entry: MinimalBatchReportEntry) -> str:
     attempt = entry.attempt if entry.attempt is not None else entry.attempts
     error_type = entry.error_type.value if entry.error_type is not None else "none"
     duration_ms = "none" if entry.duration_ms is None else str(entry.duration_ms)
+    final_route_label = entry.final_route_label or "none"
     return (
         f"- batch_id: {entry.batch_id} | cue_range: {cue_range} | status: {entry.state.value} "
         f"| attempt: {attempt} | error_type: {error_type} | cache_hit: {entry.cache_hit} | duration_ms: {duration_ms}"
+        f" | final_route_label: {final_route_label}"
     )

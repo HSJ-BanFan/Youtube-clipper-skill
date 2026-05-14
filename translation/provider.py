@@ -8,8 +8,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 from translation.config import TranslationConfig
+from translation.models import ErrorType
 
 REQUEST_TIMEOUT_SECONDS = 120
+
+
+class ProviderError(RuntimeError):
+    def __init__(self, error_type: ErrorType, message: str, cause: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.cause = cause
 
 
 @runtime_checkable
@@ -70,14 +78,16 @@ class OpenAICompatibleProvider(TranslationProvider):
             with request.urlopen(http_request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 status = response.status
                 if status < 200 or status >= 300:
-                    raise RuntimeError(f"translation provider HTTP {status}")
+                    error_type = ErrorType.PROVIDER_HTTP_5XX if 500 <= status < 600 else ErrorType.PROVIDER_REQUEST_FAILED
+                    raise ProviderError(error_type, f"translation provider HTTP {status}")
                 response_body = response.read().decode("utf-8")
         except HTTPError as exc:
-            raise RuntimeError(f"translation provider HTTP {exc.code}") from None
-        except (TimeoutError, socket.timeout):
-            raise RuntimeError("translation provider request timed out") from None
-        except URLError:
-            raise RuntimeError("translation provider request failed") from None
+            error_type = ErrorType.PROVIDER_HTTP_5XX if 500 <= exc.code < 600 else ErrorType.PROVIDER_REQUEST_FAILED
+            raise ProviderError(error_type, f"translation provider HTTP {exc.code}", cause=exc) from None
+        except (TimeoutError, socket.timeout) as exc:
+            raise ProviderError(ErrorType.PROVIDER_TIMEOUT, "translation provider request timed out", cause=exc) from None
+        except URLError as exc:
+            raise ProviderError(ErrorType.PROVIDER_REQUEST_FAILED, "translation provider request failed", cause=exc) from None
 
         return _load_response_json(response_body)
 
@@ -88,11 +98,11 @@ def _load_response_json(response_body: str) -> Any:
     try:
         response_data, end_index = decoder.raw_decode(stripped_body)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("translation provider returned invalid JSON") from exc
+        raise ProviderError(ErrorType.PROVIDER_REQUEST_FAILED, "translation provider returned invalid JSON", cause=exc) from exc
 
     trailing = stripped_body[end_index:].strip()
     if trailing and not _is_allowed_sse_trailer(trailing):
-        raise RuntimeError("translation provider returned invalid JSON")
+        raise ProviderError(ErrorType.PROVIDER_REQUEST_FAILED, "translation provider returned invalid JSON")
     return response_data
 
 
@@ -104,7 +114,14 @@ def _extract_message_content(response_data: Any) -> str:
     try:
         content = response_data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("translation provider response missing choices[0].message.content") from exc
+        raise ProviderError(
+            ErrorType.PROVIDER_MISSING_CHOICES,
+            "translation provider response missing choices[0].message.content",
+            cause=exc,
+        ) from exc
     if not isinstance(content, str):
-        raise RuntimeError("translation provider response missing choices[0].message.content")
+        raise ProviderError(
+            ErrorType.PROVIDER_MISSING_CHOICES,
+            "translation provider response missing choices[0].message.content",
+        )
     return content

@@ -38,6 +38,7 @@ ENV_MAPPING = {
     "main_model_alias": "TRANSLATION_MAIN_MODEL_ALIAS",
     "repair_model_alias": "TRANSLATION_REPAIR_MODEL_ALIAS",
     "fallback_model_alias": "TRANSLATION_FALLBACK_MODEL_ALIAS",
+    "fallback_model": "TRANSLATION_FALLBACK_MODEL",
     "batch_max_chars": "TRANSLATION_BATCH_MAX_CHARS",
     "batch_max_cues": "TRANSLATION_BATCH_MAX_CUES",
     "concurrency": "TRANSLATION_CONCURRENCY",
@@ -70,6 +71,7 @@ class TranslationConfig:
     main_model_alias: str = "main"
     repair_model_alias: str = "repair"
     fallback_model_alias: str = "fallback"
+    fallback_model: str | None = None
     batch_max_chars: int | None = None
     batch_max_cues: int | None = None
     concurrency: int = 1
@@ -157,6 +159,7 @@ class TranslationConfig:
             "main_model_alias": self.main_model_alias,
             "repair_model_alias": self.repair_model_alias,
             "fallback_model_alias": self.fallback_model_alias,
+            "fallback_model": self.fallback_model,
             "batch_max_chars": self.batch_max_chars,
             "batch_max_cues": self.batch_max_cues,
             "concurrency": self.concurrency,

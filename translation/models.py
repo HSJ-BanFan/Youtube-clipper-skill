@@ -90,6 +90,10 @@ class ErrorType(str, Enum):
     INVALID_CUE_ID = "invalid_cue_id"
     CONTEXT_CUE_OUTPUT_VIOLATION = "context_cue_output_violation"
     EMPTY_TRANSLATION = "empty_translation"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_HTTP_5XX = "provider_http_5xx"
+    PROVIDER_REQUEST_FAILED = "provider_request_failed"
+    PROVIDER_MISSING_CHOICES = "provider_missing_choices"
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,7 @@ class AttemptRecord:
     duration_ms: int
     cache_hit: bool
     result_state: BatchState
+    route_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,3 +154,4 @@ class MinimalBatchReportEntry:
     duration_ms: int | None = None
     failure_mode: FailureMode | None = None
     error_summary: str | None = None
+    final_route_label: str | None = None

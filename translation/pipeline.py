@@ -4,7 +4,7 @@ import hashlib
 import json
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock
 from time import perf_counter
@@ -37,6 +37,7 @@ from translation.subtitles import (
 @dataclass(frozen=True)
 class BatchStatsDelta:
     provider_calls: int = 0
+    fallback_provider_calls: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
     retries: int = 0
@@ -56,6 +57,7 @@ class BatchExecutionFailed(RuntimeError):
 
 
 _CACHE_ACCESS_LOCK = Lock()
+_INVALID_JSON_MESSAGE = "translation response is not valid JSON"
 
 
 def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfig) -> PipelineResult:
@@ -260,6 +262,7 @@ def _execute_translation_batch(
                     attempt=0,
                     error_type=None,
                     duration_ms=_duration_ms(batch_started_at),
+                    final_route_label="main",
                 ),
             )
     elif config.cache_enabled:
@@ -267,7 +270,7 @@ def _execute_translation_batch(
 
     provider = OpenAICompatibleProvider(config)
     try:
-        response_text, batch_translations, batch_error_type = _translate_batch_with_retries(
+        response_text, batch_translations, batch_error_type, final_route_label, attempts_used = _translate_batch_with_retries(
             provider,
             prompt,
             batch,
@@ -279,7 +282,7 @@ def _execute_translation_batch(
     except RuntimeError as error:
         raise BatchExecutionFailed(error) from error
 
-    if cancellation_event is None or not cancellation_event.is_set():
+    if final_route_label == "main" and (cancellation_event is None or not cancellation_event.is_set()):
         _write_cached_response(
             config,
             CacheEntry(
@@ -301,7 +304,6 @@ def _execute_translation_batch(
             ),
         )
 
-    attempts_used = local_stats.retries + 1
     ordered_translations = tuple((cue.id, batch_translations[cue.id]) for cue in batch.cues)
     return BatchExecutionResult(
         translations=ordered_translations,
@@ -316,6 +318,7 @@ def _execute_translation_batch(
             attempt=attempts_used,
             error_type=batch_error_type,
             duration_ms=_duration_ms(batch_started_at),
+            final_route_label=final_route_label,
         ),
     )
 
@@ -348,6 +351,7 @@ def _merge_batch_execution_result(
 
 def _merge_stats_delta(stats: TranslationStats, stats_delta: BatchStatsDelta) -> None:
     stats.provider_calls += stats_delta.provider_calls
+    stats.fallback_provider_calls += stats_delta.fallback_provider_calls
     stats.cache_hits += stats_delta.cache_hits
     stats.cache_misses += stats_delta.cache_misses
     stats.retries += stats_delta.retries
@@ -356,6 +360,7 @@ def _merge_stats_delta(stats: TranslationStats, stats_delta: BatchStatsDelta) ->
 def _stats_delta_from_stats(stats: TranslationStats) -> BatchStatsDelta:
     return BatchStatsDelta(
         provider_calls=stats.provider_calls,
+        fallback_provider_calls=stats.fallback_provider_calls,
         cache_hits=stats.cache_hits,
         cache_misses=stats.cache_misses,
         retries=stats.retries,
@@ -385,8 +390,8 @@ def parse_translation_response(
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
         if batch_record is not None and translation_id_key == "cue_id":
-            raise _structured_translation_error(batch_id, ErrorType.INVALID_JSON, "translation response is not valid JSON") from exc
-        raise ValueError(f"batch_id {batch_id} translation response is not valid JSON") from exc
+            raise _structured_translation_error(batch_id, ErrorType.INVALID_JSON, _INVALID_JSON_MESSAGE) from exc
+        raise ValueError(f"batch_id {batch_id} {_INVALID_JSON_MESSAGE}") from exc
 
     if batch_record is not None and translation_id_key == "cue_id":
         structured_translations = _parse_structured_translation_response(payload, batch_record, batch_id)
@@ -624,29 +629,80 @@ def _translate_batch_with_retries(
     stats: TranslationStats,
     translation_id_key: str = "id",
     batch_record: BatchRecord | None = None,
-) -> tuple[str, dict[str, str], ErrorType | None]:
-    attempts = _attempt_count(config)
+) -> tuple[str, dict[str, str], ErrorType | None, str, int]:
+    def _attempt_route(active_provider: TranslationProvider) -> tuple[str, dict[str, str]]:
+        response_text = active_provider.translate_batch(prompt)
+        translations = parse_translation_response(
+            response_text,
+            batch.cues,
+            batch.batch_id,
+            translation_id_key=translation_id_key,
+            batch_record=batch_record,
+        )
+        return response_text, translations
+
+    main_attempts = _attempt_count(config)
+    total_attempts = 0
     last_error: Exception | None = None
     last_error_type: ErrorType | None = None
-    for attempt in range(1, attempts + 1):
+    result: tuple[str, dict[str, str], ErrorType | None, str, int] | None = None
+
+    for _ in range(main_attempts):
+        total_attempts += 1
         try:
             stats.provider_calls += 1
-            response_text = provider.translate_batch(prompt)
-            translations = parse_translation_response(
-                response_text,
-                batch.cues,
-                batch.batch_id,
-                translation_id_key=translation_id_key,
-                batch_record=batch_record,
-            )
-            stats.retries += attempt - 1
-            return response_text, translations, last_error_type
+            response_text, translations = _attempt_route(provider)
+            result = (response_text, translations, last_error_type, "main", total_attempts)
+            break
         except (RuntimeError, ValueError) as exc:
             last_error = exc
-            last_error_type = getattr(exc, "error_type", None)
-    stats.retries += max(attempts - 1, 0)
+            last_error_type = _classify_translation_error(exc)
+
+    if result is None and _should_use_fallback_route(last_error_type, config):
+        fallback_provider = OpenAICompatibleProvider(replace(config, model=config.fallback_model))
+        total_attempts += 1
+        try:
+            stats.provider_calls += 1
+            stats.fallback_provider_calls += 1
+            response_text, translations = _attempt_route(fallback_provider)
+            result = (response_text, translations, last_error_type, "fallback", total_attempts)
+        except (RuntimeError, ValueError) as exc:
+            last_error = exc
+            if last_error_type is None:
+                last_error_type = _classify_translation_error(exc)
+
+    stats.retries += max(total_attempts - 1, 0)
+    if result is not None:
+        return result
+
     detail = f": {last_error}" if last_error is not None else ""
-    raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
+    raise RuntimeError(f"batch_id {batch.batch_id} failed after {total_attempts} attempts{detail}") from last_error
+
+
+def _classify_translation_error(error: RuntimeError | ValueError) -> ErrorType | None:
+    error_type = getattr(error, "error_type", None)
+    if isinstance(error_type, ErrorType):
+        return error_type
+    if str(error).endswith(_INVALID_JSON_MESSAGE):
+        return ErrorType.INVALID_JSON
+    return None
+
+
+PROVIDER_FALLBACK_ERROR_TYPES = {
+    ErrorType.PROVIDER_TIMEOUT,
+    ErrorType.PROVIDER_HTTP_5XX,
+    ErrorType.PROVIDER_REQUEST_FAILED,
+    ErrorType.PROVIDER_MISSING_CHOICES,
+}
+
+
+FALLBACK_ELIGIBLE_ERROR_TYPES = PROVIDER_FALLBACK_ERROR_TYPES | {ErrorType.INVALID_JSON}
+
+
+def _should_use_fallback_route(error_type: ErrorType | None, config: TranslationConfig) -> bool:
+    if not config.fallback_model:
+        return False
+    return error_type in FALLBACK_ELIGIBLE_ERROR_TYPES
 
 
 def _build_structured_batch_record(batch: TranslationBatch) -> BatchRecord:
