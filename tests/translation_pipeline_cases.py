@@ -454,6 +454,164 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("batch_id: 1 | cue_range: 1-1 | status: success | attempt: 0 | error_type: none | cache_hit: True", report)
         self.assertRegex(report, r"duration_ms: \d+")
 
+    def test_v2_structured_cache_does_not_reuse_v1_entry(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "初始v1"}])
+
+        class StructuredProvider:
+            calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                StructuredProvider.calls += 1
+                return json.dumps([{"cue_id": "1", "translation": "结构化v2"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            seed_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "seed"),
+                batch_size=1,
+                cache_path=str(cache_path),
+            )
+            v2_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, seed_config)
+            with patch("translation.pipeline.OpenAICompatibleProvider", StructuredProvider):
+                run_translation_pipeline(subtitle_path, v2_config)
+
+            report = (root / "out" / "translation_report.md").read_text(encoding="utf-8")
+            translated = (root / "out" / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertEqual(StructuredProvider.calls, 1)
+        self.assertIn("结构化v2", translated)
+        self.assertIn("cache_hits: 0", report)
+        self.assertIn("cache_misses: 1", report)
+        self.assertIn("provider_calls: 1", report)
+
+    def test_structured_output_toggle_does_not_reuse_cache_entry(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "非结构化v2"}])
+
+        class StructuredProvider:
+            calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                StructuredProvider.calls += 1
+                return json.dumps([{"cue_id": "1", "translation": "结构化v2"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            seed_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "seed"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=False,
+            )
+            structured_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                qa_mode="none",
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, seed_config)
+            with patch("translation.pipeline.OpenAICompatibleProvider", StructuredProvider):
+                run_translation_pipeline(subtitle_path, structured_config)
+
+            report = (root / "out" / "translation_report.md").read_text(encoding="utf-8")
+            translated = (root / "out" / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertEqual(StructuredProvider.calls, 1)
+        self.assertIn("结构化v2", translated)
+        self.assertIn("cache_hits: 0", report)
+        self.assertIn("cache_misses: 1", report)
+        self.assertIn("provider_calls: 1", report)
+
+    def test_base_url_change_does_not_reuse_cache_entry(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "主网关"}])
+
+        class AlternateProvider:
+            calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                AlternateProvider.calls += 1
+                return json.dumps([{"id": "1", "translation": "次网关"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            seed_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "seed"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                base_url="https://gateway-a.example.test/v1",
+            )
+            second_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "out"),
+                batch_size=1,
+                cache_path=str(cache_path),
+                base_url="https://gateway-b.example.test/v1",
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, seed_config)
+            with patch("translation.pipeline.OpenAICompatibleProvider", AlternateProvider):
+                run_translation_pipeline(subtitle_path, second_config)
+
+            report = (root / "out" / "translation_report.md").read_text(encoding="utf-8")
+            translated = (root / "out" / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertEqual(AlternateProvider.calls, 1)
+        self.assertIn("次网关", translated)
+        self.assertIn("cache_hits: 0", report)
+        self.assertIn("cache_misses: 1", report)
+        self.assertIn("provider_calls: 1", report)
+
     def test_batch_source_hash_changes_when_prompt_context_changes(self):
         current_cue = Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello")
         context_cue = Cue(id="2", index=2, start="00:00:02,000", end="00:00:03,000", source="world")

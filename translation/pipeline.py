@@ -90,10 +90,16 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
                 )
             batch_source_hash = _build_batch_source_hash(prompt)
             cache_key = build_batch_cache_key(
+                config.engine_version,
+                config.structured_output,
                 config.provider,
+                config.base_url,
                 config.model,
+                config.main_model_alias,
                 config.target_lang,
                 PROMPT_VERSION,
+                config.output_schema_version,
+                config.batching_strategy_version,
                 glossary.hash,
                 global_context.hash,
                 batch_source_hash,
@@ -143,10 +149,16 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
                 cache.set(
                     CacheEntry(
                         cache_key=cache_key,
+                        engine_version=config.engine_version,
+                        structured_output=config.structured_output,
                         provider=config.provider,
+                        base_url=config.base_url,
                         model=config.model,
+                        main_model_alias=config.main_model_alias,
                         target_lang=config.target_lang,
                         prompt_version=PROMPT_VERSION,
+                        output_schema_version=config.output_schema_version,
+                        batching_strategy_version=config.batching_strategy_version,
                         glossary_hash=glossary.hash,
                         context_hash=global_context.hash,
                         batch_source_hash=batch_source_hash,
