@@ -294,17 +294,33 @@ def _parse_structured_translation_response(
             f"translation count {len(payload)} does not match cue count {len(batch_record.target_cues)}",
         )
 
+    expected_item_keys = {"cue_id", "translation"}
+    target_cue_ids = {cue.cue_id for cue in batch_record.target_cues}
+    context_cue_ids = {cue.cue_id for cue in batch_record.context_before} | {
+        cue.cue_id for cue in batch_record.context_after
+    }
     translations: dict[str, str] = {}
     for item in payload:
         if not isinstance(item, dict):
             raise _structured_translation_error(batch_id, ErrorType.SCHEMA_MISMATCH, "translation item must be an object")
-        cue_id = item.get("cue_id")
-        translation = item.get("translation")
+        if set(item) != expected_item_keys:
+            raise _structured_translation_error(
+                batch_id,
+                ErrorType.SCHEMA_MISMATCH,
+                "translation item keys must exactly match cue_id and translation",
+            )
+        cue_id = item["cue_id"]
+        translation = item["translation"]
         if not isinstance(cue_id, str) or not cue_id.strip():
             raise _structured_translation_error(batch_id, ErrorType.MISSING_REQUIRED_CUE_ID, "translation item cue_id must be a non-empty string")
         if cue_id in translations:
             raise _structured_translation_error(batch_id, ErrorType.DUPLICATE_CUE_ID, f"duplicate cue_id {cue_id}")
-        classification = _classify_structured_cue_id(batch_record, cue_id)
+        classification = _classify_structured_cue_id(
+            batch_record,
+            cue_id,
+            target_cue_ids=target_cue_ids,
+            context_cue_ids=context_cue_ids,
+        )
         if classification is not None:
             raise _structured_translation_error(batch_id, classification, f"unexpected cue_id {cue_id}")
         if not isinstance(translation, str):
@@ -313,10 +329,9 @@ def _parse_structured_translation_response(
             raise _structured_translation_error(batch_id, ErrorType.EMPTY_TRANSLATION, f"translation for cue_id {cue_id} is empty")
         translations[cue_id] = translation
 
-    expected_cue_ids = {cue.cue_id for cue in batch_record.target_cues}
     returned_cue_ids = set(translations)
-    if returned_cue_ids != expected_cue_ids:
-        missing_cue_ids = sorted(expected_cue_ids - returned_cue_ids)
+    if returned_cue_ids != target_cue_ids:
+        missing_cue_ids = sorted(target_cue_ids - returned_cue_ids)
         missing = missing_cue_ids[0] if missing_cue_ids else "unknown"
         raise _structured_translation_error(batch_id, ErrorType.MISSING_REQUIRED_CUE_ID, f"missing translation for cue_id {missing}")
     return translations
@@ -393,7 +408,7 @@ def _append_batch_report_entry(
     error_type: ErrorType | None,
     duration_ms: int,
 ) -> None:
-    stats.batch_entries += (
+    stats.batch_entries.append(
         MinimalBatchReportEntry(
             batch_id=batch.batch_id,
             state=state,
@@ -404,7 +419,7 @@ def _append_batch_report_entry(
             attempt=attempt,
             error_type=error_type,
             duration_ms=duration_ms,
-        ),
+        )
     )
 
 
@@ -513,15 +528,20 @@ def _build_structured_batch_record(batch: TranslationBatch) -> BatchRecord:
     )
 
 
-def _classify_structured_cue_id(batch_record: BatchRecord, cue_id: str) -> ErrorType | None:
-    target_cue_ids = {cue.cue_id for cue in batch_record.target_cues}
-    if cue_id in target_cue_ids:
+def _classify_structured_cue_id(
+    batch_record: BatchRecord,
+    cue_id: str,
+    target_cue_ids: set[str] | None = None,
+    context_cue_ids: set[str] | None = None,
+) -> ErrorType | None:
+    resolved_target_cue_ids = target_cue_ids or {cue.cue_id for cue in batch_record.target_cues}
+    if cue_id in resolved_target_cue_ids:
         return None
 
-    context_cue_ids = {cue.cue_id for cue in batch_record.context_before} | {
+    resolved_context_cue_ids = context_cue_ids or ({cue.cue_id for cue in batch_record.context_before} | {
         cue.cue_id for cue in batch_record.context_after
-    }
-    if cue_id in context_cue_ids:
+    })
+    if cue_id in resolved_context_cue_ids:
         return ErrorType.CONTEXT_CUE_OUTPUT_VIOLATION
     return ErrorType.INVALID_CUE_ID
 

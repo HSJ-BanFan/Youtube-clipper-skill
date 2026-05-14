@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from translation.config import TranslationConfig
 from translation.context import GlobalContext
@@ -31,7 +31,7 @@ class TranslationStats:
     cache_misses: int = 0
     retries: int = 0
     failed_batches: int = 0
-    batch_entries: tuple[MinimalBatchReportEntry, ...] = ()
+    batch_entries: list[MinimalBatchReportEntry] = field(default_factory=list)
     qa: QAStats | None = None
 
 
@@ -95,7 +95,7 @@ def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str 
     return safe_config["glossary_path"]
 
 
-def _render_report(entries: dict[str, Any], qa: QAStats, batch_entries: tuple[MinimalBatchReportEntry, ...]) -> str:
+def _render_report(entries: dict[str, Any], qa: QAStats, batch_entries: Sequence[MinimalBatchReportEntry]) -> str:
     lines = ["# Translation Report", ""]
     lines.extend(f"- {key}: {value}" for key, value in entries.items())
     lines.extend(

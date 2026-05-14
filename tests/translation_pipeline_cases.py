@@ -69,7 +69,7 @@ class TranslationResponseParserTests(unittest.TestCase):
 
         self.assertEqual(result, {"target-2": "你好"})
 
-    def test_parse_translation_response_rejects_missing_required_cue_id(self):
+    def test_parse_translation_response_rejects_missing_structured_cue_id_key(self):
         target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
         batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
         batch_record = _build_structured_batch_record(batch)
@@ -83,7 +83,7 @@ class TranslationResponseParserTests(unittest.TestCase):
                 batch_record=batch_record,
             )
 
-        self.assertEqual(raised.exception.error_type, ErrorType.MISSING_REQUIRED_CUE_ID)
+        self.assertEqual(raised.exception.error_type, ErrorType.SCHEMA_MISMATCH)
 
     def test_parse_translation_response_rejects_invalid_json_on_structured_path(self):
         target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
@@ -109,6 +109,22 @@ class TranslationResponseParserTests(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             parse_translation_response(
                 '{"cue_id":"target-2","translation":"你好"}',
+                batch.cues,
+                batch_id=7,
+                translation_id_key="cue_id",
+                batch_record=batch_record,
+            )
+
+        self.assertEqual(raised.exception.error_type, ErrorType.SCHEMA_MISMATCH)
+
+    def test_parse_translation_response_rejects_extra_structured_key(self):
+        target_cue = Cue(id="target-2", index=2, start="00:00:02,000", end="00:00:03,000", source="target")
+        batch = TranslationBatch(batch_id=7, cues=(target_cue,), context_before=(), context_after=())
+        batch_record = _build_structured_batch_record(batch)
+
+        with self.assertRaises(ValueError) as raised:
+            parse_translation_response(
+                '[{"cue_id":"target-2","translation":"你好","start":"00:00:02,000"}]',
                 batch.cues,
                 batch_id=7,
                 translation_id_key="cue_id",
@@ -285,16 +301,19 @@ class QAResponseParserTests(unittest.TestCase):
 
 class TranslationPipelineExecutionTests(unittest.TestCase):
     def test_non_dry_run_writes_outputs_cache_report_and_context_with_fake_provider(self):
+        captured_prompts: list[str] = []
+
         class FakeProvider:
             calls = 0
-            prompts: list[str] = []
 
             def __init__(self, config):
                 self.config = config
+                self.prompts: list[str] = []
 
             def translate_batch(self, prompt):
                 FakeProvider.calls += 1
-                FakeProvider.prompts.append(prompt)
+                self.prompts.append(prompt)
+                captured_prompts.append(prompt)
                 return json.dumps([{"id": "1", "translation": "你好"}])
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,7 +339,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             context = (output_dir / "global_context.md").read_text(encoding="utf-8")
             cache_exists = cache_path.exists()
             cache_rows = _read_cache_rows(cache_path)
-            prompt = FakeProvider.prompts[0]
+            prompt = captured_prompts[0]
 
         self.assertTrue(result.provider_called)
         self.assertEqual(FakeProvider.calls, 1)
@@ -620,14 +639,16 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("你好", translated)
 
     def test_structured_prompt_uses_fallback_cue_ids_when_original_ids_are_unstable(self):
-        class FakeProvider:
-            prompts: list[str] = []
+        captured_prompts: list[str] = []
 
+        class FakeProvider:
             def __init__(self, config):
                 self.config = config
+                self.prompts: list[str] = []
 
             def translate_batch(self, prompt):
-                FakeProvider.prompts.append(prompt)
+                self.prompts.append(prompt)
+                captured_prompts.append(prompt)
                 return json.dumps([{"cue_id": "1", "translation": "你好"}])
 
         target_cue = Cue(id="shared-id", index=1, start="00:00:02,000", end="00:00:03,000", source="target")
@@ -660,19 +681,21 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             ), patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
                 run_translation_pipeline(subtitle_path, config)
 
-        self.assertIn('Current cues to translate:\n[\n  {\n    "cue_id": "1"', FakeProvider.prompts[0])
-        self.assertIn('Before context:\n[\n  {\n    "cue_id": "99"', FakeProvider.prompts[0])
-        self.assertNotIn('"cue_id": "shared-id"', FakeProvider.prompts[0])
+        self.assertIn('Current cues to translate:\n[\n  {\n    "cue_id": "1"', captured_prompts[0])
+        self.assertIn('Before context:\n[\n  {\n    "cue_id": "99"', captured_prompts[0])
+        self.assertNotIn('"cue_id": "shared-id"', captured_prompts[0])
 
     def _capture_translation_prompt(self, config):
-        class FakeProvider:
-            prompts: list[str] = []
+        captured_prompts: list[str] = []
 
+        class FakeProvider:
             def __init__(self, provider_config):
                 self.config = provider_config
+                self.prompts: list[str] = []
 
             def translate_batch(self, prompt):
-                FakeProvider.prompts.append(prompt)
+                self.prompts.append(prompt)
+                captured_prompts.append(prompt)
                 if self.config.engine_version == "v2" and self.config.structured_output:
                     return json.dumps([{"cue_id": "1", "translation": "你好"}])
                 return json.dumps([{"id": "1", "translation": "你好"}])
@@ -687,7 +710,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
                 run_translation_pipeline(subtitle_path, config)
 
-        return FakeProvider.prompts[0]
+        return captured_prompts[0]
 
     def test_cache_disabled_calls_provider_every_run(self):
         class FakeProvider:
