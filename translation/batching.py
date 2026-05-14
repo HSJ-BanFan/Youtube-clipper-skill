@@ -28,3 +28,56 @@ def create_batches(
             )
         )
     return batches
+
+
+def allocate_child_batch_ids(next_child_batch_id: int) -> tuple[int, int, int]:
+    if next_child_batch_id <= 0:
+        raise ValueError("next_child_batch_id must be greater than 0")
+    left_child_id = next_child_batch_id
+    right_child_id = next_child_batch_id + 1
+    return left_child_id, right_child_id, next_child_batch_id + 2
+
+
+
+def split_batch(
+    batch: TranslationBatch,
+    left_child_id: int,
+    right_child_id: int,
+) -> tuple[TranslationBatch, TranslationBatch]:
+    if len(batch.cues) < 2:
+        raise ValueError("cannot split batch with fewer than 2 target cues")
+    if left_child_id == right_child_id:
+        raise ValueError("child batch ids must be unique")
+
+    midpoint = len(batch.cues) // 2
+    left_child = TranslationBatch(
+        batch_id=left_child_id,
+        cues=batch.cues[:midpoint],
+        context_before=batch.context_before,
+        context_after=batch.context_after,
+    )
+    right_child = TranslationBatch(
+        batch_id=right_child_id,
+        cues=batch.cues[midpoint:],
+        context_before=batch.context_before,
+        context_after=batch.context_after,
+    )
+    _validate_split_children(batch, left_child, right_child)
+    return left_child, right_child
+
+
+
+def _validate_split_children(
+    parent_batch: TranslationBatch,
+    left_child: TranslationBatch,
+    right_child: TranslationBatch,
+) -> None:
+    left_ids = {cue.id for cue in left_child.cues}
+    right_ids = {cue.id for cue in right_child.cues}
+    if not left_ids.isdisjoint(right_ids):
+        raise ValueError("child target cues must not overlap")
+
+    parent_ids = tuple(cue.id for cue in parent_batch.cues)
+    child_ids = tuple(cue.id for cue in left_child.cues + right_child.cues)
+    if child_ids != parent_ids:
+        raise ValueError("child target cues must preserve parent cue union and order")

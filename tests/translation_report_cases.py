@@ -235,6 +235,58 @@ class TranslationReportTests(unittest.TestCase):
         self.assertIn("fallback_provider_calls: 1", report)
         self.assertIn("final_route_label: fallback", report)
 
+    def test_write_translation_report_renders_split_metadata_when_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_paths = TranslationOutputPaths(
+                output_dir=root / "translated",
+                translated_srt=root / "translated" / "translated.zh-CN.srt",
+                bilingual_srt=root / "translated" / "bilingual.srt",
+                translation_report=root / "translated" / "translation_report.md",
+                global_context=root / "translated" / "global_context.md",
+            )
+            result = PipelineResult(
+                input_path=root / "input.en.srt",
+                input_format="srt",
+                output_format="srt",
+                output_paths=output_paths,
+                dry_run=False,
+                cue_count=2,
+                provider_called=True,
+            )
+            stats = TranslationStats(
+                total_batches=1,
+                provider_calls=3,
+                batch_entries=[
+                    MinimalBatchReportEntry(
+                        batch_id=71,
+                        state=BatchState.SUCCESS,
+                        cue_count=2,
+                        attempts=3,
+                        cache_hit=False,
+                        parent_batch_id=7,
+                        child_batch_ids=(72, 73),
+                        split_reason="schema_mismatch",
+                        split_attempt=1,
+                        split_strategy_version="v1",
+                        original_target_cue_range=(1, 2),
+                    )
+                ],
+            )
+            glossary = Glossary(path=None, text="", hash="", exists=False, truncated=False)
+            context = GlobalContext(text="", hash="")
+            report_path = root / "translated" / "translation_report.md"
+
+            write_translation_report(report_path, result, TranslationConfig(api_key="sk-test"), stats, glossary, context)
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("parent_batch_id: 7", report)
+        self.assertIn("child_batch_ids: 72,73", report)
+        self.assertIn("split_reason: schema_mismatch", report)
+        self.assertIn("split_attempt: 1", report)
+        self.assertIn("split_strategy_version: v1", report)
+        self.assertIn("original_target_cue_range: 1-2", report)
+
 
 if __name__ == "__main__":
     unittest.main()

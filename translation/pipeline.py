@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Event, Lock
 from time import perf_counter
 
-from translation.batching import create_batches
+from translation.batching import allocate_child_batch_ids, create_batches, split_batch
 from translation.cache import CacheEntry, TranslationCache, build_batch_cache_key
 from translation.config import TranslationConfig
 from translation.context import build_global_context, write_global_context
@@ -56,8 +56,40 @@ class BatchExecutionFailed(RuntimeError):
         self.error = error
 
 
+class BatchRoutingFailed(RuntimeError):
+    def __init__(self, batch_id: int, error: Exception | None, error_type: ErrorType | None, attempts_used: int) -> None:
+        detail = f": {error}" if error is not None else ""
+        super().__init__(f"batch_id {batch_id} failed after {attempts_used} attempts{detail}")
+        self.error = error
+        self.error_type = error_type
+        self.attempts_used = attempts_used
+
+
+class ChildBatchIdAllocator:
+    def __init__(self, next_child_batch_id: int) -> None:
+        self._next_child_batch_id = next_child_batch_id
+        self._lock = Lock()
+
+    def allocate_pair(self) -> tuple[int, int]:
+        with self._lock:
+            left_child_id, right_child_id, next_child_batch_id = allocate_child_batch_ids(self._next_child_batch_id)
+            self._next_child_batch_id = next_child_batch_id
+            return left_child_id, right_child_id
+
+
 _CACHE_ACCESS_LOCK = Lock()
 _INVALID_JSON_MESSAGE = "translation response is not valid JSON"
+SHRINK_BATCH_MAX_SPLIT_ATTEMPTS = 2
+SHRINK_BATCH_STRATEGY_VERSION = "v1"
+SHRINK_ELIGIBLE_ERROR_TYPES = {
+    ErrorType.INVALID_JSON,
+    ErrorType.SCHEMA_MISMATCH,
+    ErrorType.MISSING_REQUIRED_CUE_ID,
+    ErrorType.DUPLICATE_CUE_ID,
+    ErrorType.INVALID_CUE_ID,
+    ErrorType.CONTEXT_CUE_OUTPUT_VIOLATION,
+    ErrorType.EMPTY_TRANSLATION,
+}
 
 
 def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfig) -> PipelineResult:
@@ -126,6 +158,7 @@ def _run_translation_batches(
     global_context_text: str,
     global_context_hash: str,
 ) -> list[BatchExecutionResult]:
+    child_batch_id_allocator = _create_child_batch_id_allocator(batches)
     if config.concurrency == 1:
         ordered_results: list[BatchExecutionResult] = []
         for batch in batches:
@@ -138,6 +171,7 @@ def _run_translation_batches(
                         glossary_hash,
                         global_context_text,
                         global_context_hash,
+                        child_batch_id_allocator,
                     )
                 )
             except BatchExecutionFailed as failure:
@@ -157,6 +191,7 @@ def _run_translation_batches(
                 glossary_hash,
                 global_context_text,
                 global_context_hash,
+                child_batch_id_allocator,
                 cancellation_event,
             ): batch_index
             for batch_index, batch in enumerate(batches)
@@ -194,7 +229,9 @@ def _execute_translation_batch(
     glossary_hash: str,
     global_context_text: str,
     global_context_hash: str,
+    child_batch_id_allocator: ChildBatchIdAllocator,
     cancellation_event: Event | None = None,
+    split_attempt: int = 0,
 ) -> BatchExecutionResult:
     batch_started_at = perf_counter()
     translation_id_key = "id"
@@ -279,6 +316,23 @@ def _execute_translation_batch(
             translation_id_key=translation_id_key,
             batch_record=structured_batch_record,
         )
+    except BatchRoutingFailed as error:
+        if config.engine_version == "v2" and config.structured_output and _should_shrink_batch(batch, error.error_type, split_attempt):
+            return _execute_shrunk_batch(
+                batch,
+                config,
+                glossary_text,
+                glossary_hash,
+                global_context_text,
+                global_context_hash,
+                child_batch_id_allocator,
+                local_stats,
+                batch_started_at,
+                error.error_type,
+                split_attempt,
+                cancellation_event,
+            )
+        raise BatchExecutionFailed(error) from error
     except RuntimeError as error:
         raise BatchExecutionFailed(error) from error
 
@@ -339,6 +393,75 @@ def _write_cached_response(config: TranslationConfig, entry: CacheEntry) -> None
             cache.set(entry)
 
 
+def _execute_shrunk_batch(
+    batch: TranslationBatch,
+    config: TranslationConfig,
+    glossary_text: str,
+    glossary_hash: str,
+    global_context_text: str,
+    global_context_hash: str,
+    child_batch_id_allocator: ChildBatchIdAllocator,
+    parent_stats: TranslationStats,
+    batch_started_at: float,
+    split_error_type: ErrorType | None,
+    split_attempt: int,
+    cancellation_event: Event | None,
+) -> BatchExecutionResult:
+    left_child_id, right_child_id = child_batch_id_allocator.allocate_pair()
+    left_child, right_child = split_batch(batch, left_child_id=left_child_id, right_child_id=right_child_id)
+    child_results = (
+        _execute_translation_batch(
+            left_child,
+            config,
+            glossary_text,
+            glossary_hash,
+            global_context_text,
+            global_context_hash,
+            child_batch_id_allocator,
+            cancellation_event,
+            split_attempt + 1,
+        ),
+        _execute_translation_batch(
+            right_child,
+            config,
+            glossary_text,
+            glossary_hash,
+            global_context_text,
+            global_context_hash,
+            child_batch_id_allocator,
+            cancellation_event,
+            split_attempt + 1,
+        ),
+    )
+    parent_attempts = parent_stats.provider_calls
+    total_attempts = parent_attempts + sum(result.batch_entry.attempts for result in child_results)
+    cue_range = (batch.cues[0].index, batch.cues[-1].index)
+    return BatchExecutionResult(
+        translations=_merge_child_translations_in_parent_order(batch, child_results),
+        stats_delta=_combine_stats_deltas(
+            _stats_delta_from_stats(parent_stats),
+            *(result.stats_delta for result in child_results),
+        ),
+        batch_entry=MinimalBatchReportEntry(
+            batch_id=batch.batch_id,
+            state=BatchState.SUCCESS,
+            cue_count=len(batch.cues),
+            attempts=total_attempts,
+            cache_hit=False,
+            cue_range=cue_range,
+            attempt=total_attempts,
+            error_type=split_error_type,
+            duration_ms=_duration_ms(batch_started_at),
+            final_route_label="shrink",
+            child_batch_ids=(left_child_id, right_child_id),
+            split_reason=split_error_type.value if split_error_type is not None else "unknown",
+            split_attempt=split_attempt + 1,
+            split_strategy_version=SHRINK_BATCH_STRATEGY_VERSION,
+            original_target_cue_range=cue_range,
+        ),
+    )
+
+
 def _merge_batch_execution_result(
     stats: TranslationStats,
     all_translations: dict[str, str],
@@ -365,6 +488,45 @@ def _stats_delta_from_stats(stats: TranslationStats) -> BatchStatsDelta:
         cache_misses=stats.cache_misses,
         retries=stats.retries,
     )
+
+
+def _combine_stats_deltas(*stats_deltas: BatchStatsDelta) -> BatchStatsDelta:
+    return BatchStatsDelta(
+        provider_calls=sum(stats_delta.provider_calls for stats_delta in stats_deltas),
+        fallback_provider_calls=sum(stats_delta.fallback_provider_calls for stats_delta in stats_deltas),
+        cache_hits=sum(stats_delta.cache_hits for stats_delta in stats_deltas),
+        cache_misses=sum(stats_delta.cache_misses for stats_delta in stats_deltas),
+        retries=sum(stats_delta.retries for stats_delta in stats_deltas),
+    )
+
+
+def _create_child_batch_id_allocator(
+    batches: list[TranslationBatch] | tuple[TranslationBatch, ...],
+) -> ChildBatchIdAllocator:
+    next_child_batch_id = max((batch.batch_id for batch in batches), default=0) + 1
+    return ChildBatchIdAllocator(next_child_batch_id)
+
+
+def _merge_child_translations_in_parent_order(
+    parent_batch: TranslationBatch,
+    child_results: tuple[BatchExecutionResult, BatchExecutionResult],
+) -> tuple[tuple[str, str], ...]:
+    merged_translations: dict[str, str] = {}
+    for child_result in child_results:
+        merged_translations.update(child_result.translations)
+    return tuple((cue.id, merged_translations[cue.id]) for cue in parent_batch.cues)
+
+
+def _should_shrink_batch(
+    batch: TranslationBatch,
+    error_type: ErrorType | None,
+    split_attempt: int,
+) -> bool:
+    if len(batch.cues) < 2:
+        return False
+    if split_attempt >= SHRINK_BATCH_MAX_SPLIT_ATTEMPTS:
+        return False
+    return error_type in SHRINK_ELIGIBLE_ERROR_TYPES
 
 
 def _raise_batch_runtime_error(error: RuntimeError) -> None:
@@ -675,8 +837,7 @@ def _translate_batch_with_retries(
     if result is not None:
         return result
 
-    detail = f": {last_error}" if last_error is not None else ""
-    raise RuntimeError(f"batch_id {batch.batch_id} failed after {total_attempts} attempts{detail}") from last_error
+    raise BatchRoutingFailed(batch.batch_id, last_error, last_error_type, total_attempts) from last_error
 
 
 def _classify_translation_error(error: RuntimeError | ValueError) -> ErrorType | None:
