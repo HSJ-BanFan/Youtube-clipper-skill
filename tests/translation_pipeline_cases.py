@@ -1,6 +1,8 @@
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -407,6 +409,486 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("cache_hits: 1", report)
         self.assertIn("provider_calls: 0", report)
         self.assertIn("cache_misses: 0", report)
+
+    def test_concurrency_one_two_and_four_keep_same_output_and_batch_report_order(self):
+        class SlowProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    time.sleep(0.05)
+                    return json.dumps([{"id": "1", "translation": "你好"}])
+                if '"id": "2",\n    "source": "world"' in prompt:
+                    return json.dumps([{"id": "2", "translation": "世界"}])
+                raise AssertionError(f"unexpected prompt: {prompt}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            outputs: dict[int, tuple[str, str]] = {}
+
+            for concurrency in (1, 2, 4):
+                output_dir = root / f"out-{concurrency}"
+                config = TranslationConfig(
+                    api_key="test-secret",
+                    output_dir=str(output_dir),
+                    batch_size=1,
+                    context_before=0,
+                    context_after=0,
+                    cache_enabled=False,
+                    qa_mode="none",
+                    concurrency=concurrency,
+                )
+
+                with patch("translation.pipeline.OpenAICompatibleProvider", SlowProvider):
+                    run_translation_pipeline(subtitle_path, config)
+
+                outputs[concurrency] = (
+                    (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8"),
+                    (output_dir / "translation_report.md").read_text(encoding="utf-8"),
+                )
+
+        translated_one, report_one = outputs[1]
+        translated_two, report_two = outputs[2]
+        translated_four, report_four = outputs[4]
+
+        self.assertEqual(translated_one, translated_two)
+        self.assertEqual(translated_one, translated_four)
+        self.assertLess(
+            report_two.find("batch_id: 1 | cue_range: 1-1"),
+            report_two.find("batch_id: 2 | cue_range: 2-2"),
+        )
+        self.assertLess(
+            report_four.find("batch_id: 1 | cue_range: 1-1"),
+            report_four.find("batch_id: 2 | cue_range: 2-2"),
+        )
+        self.assertIn("provider_calls: 2", report_one)
+        self.assertIn("provider_calls: 2", report_two)
+        self.assertIn("provider_calls: 2", report_four)
+
+    def test_concurrent_batches_use_distinct_provider_instances_and_run_once_each(self):
+        class IsolatedProvider:
+            instances_by_batch: list[tuple[str, int]] = []
+            lock = threading.Lock()
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    cue_id = "1"
+                    translation = "你好"
+                elif '"id": "2",\n    "source": "world"' in prompt:
+                    cue_id = "2"
+                    translation = "世界"
+                else:
+                    raise AssertionError(f"unexpected prompt: {prompt}")
+                with IsolatedProvider.lock:
+                    IsolatedProvider.instances_by_batch.append((cue_id, id(self)))
+                return json.dumps([{"id": cue_id, "translation": translation}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=4,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", IsolatedProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual(sorted(cue_id for cue_id, _ in IsolatedProvider.instances_by_batch), ["1", "2"])
+        self.assertEqual(
+            len({instance_id for _, instance_id in IsolatedProvider.instances_by_batch}),
+            2,
+        )
+
+    def test_concurrent_partial_cache_hit_keeps_provider_calls_and_stats_correct(self):
+        from translation.batching import create_batches
+        from translation.cache import CacheEntry, TranslationCache, build_batch_cache_key
+        from translation.context import build_global_context
+        from translation.glossary import load_glossary
+        from translation.prompts import PROMPT_VERSION
+        from translation.subtitles import parse_subtitle_file
+
+        class PartialCacheProvider:
+            calls = 0
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "2",\n    "source": "world"' not in prompt:
+                    raise AssertionError("cached batch should not call provider")
+                PartialCacheProvider.calls += 1
+                return json.dumps([{"id": "2", "translation": "世界"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            glossary_path = _write_glossary(root)
+            cache_path = root / "translation-cache.sqlite3"
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_path=str(cache_path),
+                glossary_path=str(glossary_path),
+                qa_mode="none",
+                concurrency=2,
+            )
+            cues = parse_subtitle_file(subtitle_path)
+            glossary = load_glossary(glossary_path)
+            global_context = build_global_context(cues, subtitle_path, config)
+            cached_batch = create_batches(cues, config.batch_size, config.context_before, config.context_after)[0]
+            prompt = build_translation_prompt(
+                cached_batch,
+                config.target_lang,
+                glossary.text,
+                global_context.text,
+            )
+            batch_source_hash = _build_batch_source_hash(prompt)
+            cache_key = build_batch_cache_key(
+                config.engine_version,
+                config.structured_output,
+                config.provider,
+                config.base_url,
+                config.model,
+                config.main_model_alias,
+                config.target_lang,
+                PROMPT_VERSION,
+                config.output_schema_version,
+                config.batching_strategy_version,
+                glossary.hash,
+                global_context.hash,
+                batch_source_hash,
+            )
+            with TranslationCache(cache_path) as cache:
+                cache.set(
+                    CacheEntry(
+                        cache_key=cache_key,
+                        engine_version=config.engine_version,
+                        structured_output=config.structured_output,
+                        provider=config.provider,
+                        base_url=config.base_url,
+                        model=config.model,
+                        main_model_alias=config.main_model_alias,
+                        target_lang=config.target_lang,
+                        prompt_version=PROMPT_VERSION,
+                        output_schema_version=config.output_schema_version,
+                        batching_strategy_version=config.batching_strategy_version,
+                        glossary_hash=glossary.hash,
+                        context_hash=global_context.hash,
+                        batch_source_hash=batch_source_hash,
+                        result_json=json.dumps([{"id": "1", "translation": "缓存你好"}]),
+                    )
+                )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", PartialCacheProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(PartialCacheProvider.calls, 1)
+        self.assertIn("缓存你好", translated)
+        self.assertIn("世界", translated)
+        self.assertIn("cache_hits: 1", report)
+        self.assertIn("cache_misses: 1", report)
+        self.assertIn("provider_calls: 1", report)
+
+    def test_concurrent_cache_access_serializes_cache_critical_sections(self):
+        class GuardedCache:
+            active_sections = 0
+            max_active_sections = 0
+            guard_lock = threading.Lock()
+            entries: dict[str, str] = {}
+
+            def __init__(self, path):
+                self.path = path
+                self._enter_section()
+                try:
+                    time.sleep(0.03)
+                finally:
+                    self._leave_section()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.close()
+
+            def get(self, cache_key):
+                self._enter_section()
+                try:
+                    return GuardedCache.entries.get(cache_key)
+                finally:
+                    self._leave_section()
+
+            def set(self, entry):
+                self._enter_section()
+                try:
+                    time.sleep(0.03)
+                    GuardedCache.entries[entry.cache_key] = entry.result_json
+                finally:
+                    self._leave_section()
+
+            def close(self):
+                return None
+
+            @classmethod
+            def _enter_section(cls):
+                with cls.guard_lock:
+                    if cls.active_sections != 0:
+                        raise AssertionError("cache critical section overlapped")
+                    cls.active_sections = 1
+                    cls.max_active_sections = max(cls.max_active_sections, cls.active_sections)
+
+            @classmethod
+            def _leave_section(cls):
+                with cls.guard_lock:
+                    cls.active_sections = 0
+
+        class CacheProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    return json.dumps([{"id": "1", "translation": "你好"}])
+                if '"id": "2",\n    "source": "world"' in prompt:
+                    return json.dumps([{"id": "2", "translation": "世界"}])
+                raise AssertionError(f"unexpected prompt: {prompt}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_enabled=True,
+                cache_path=str(root / "translation-cache.sqlite3"),
+                qa_mode="none",
+                concurrency=2,
+            )
+
+            with patch("translation.pipeline.TranslationCache", GuardedCache), patch(
+                "translation.pipeline.OpenAICompatibleProvider",
+                CacheProvider,
+            ):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+
+        self.assertEqual(GuardedCache.max_active_sections, 1)
+        self.assertIn("你好", translated)
+        self.assertIn("世界", translated)
+
+    def test_concurrency_only_applies_to_batch_translation_and_qa_runs_after_merge(self):
+        class QAAfterMergeProvider:
+            review_calls = 0
+            translate_calls = 0
+            lock = threading.Lock()
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    time.sleep(0.05)
+                    result = json.dumps([{"id": "1", "translation": "As an AI, I cannot help."}])
+                elif '"id": "2",\n    "source": "open https://example.test/docs and read it"' in prompt:
+                    result = json.dumps([{"id": "2", "translation": "open https://example.test/docs and read it"}])
+                else:
+                    raise AssertionError(f"unexpected prompt: {prompt}")
+                with QAAfterMergeProvider.lock:
+                    QAAfterMergeProvider.translate_calls += 1
+                return result
+
+            def review_suspicious(self, prompt):
+                with QAAfterMergeProvider.lock:
+                    if QAAfterMergeProvider.translate_calls != 2:
+                        raise AssertionError("QA started before all batch translations completed")
+                    QAAfterMergeProvider.review_calls += 1
+                return json.dumps(
+                    [
+                        {"id": "1", "action": "fix", "translation": "你好", "reason": "fixed refusal"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_suspicious_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_enabled=False,
+                concurrency=2,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", QAAfterMergeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(QAAfterMergeProvider.review_calls, 1)
+        self.assertIn("你好", translated)
+        self.assertIn("qa_provider_calls: 1", report)
+
+    def test_concurrent_batch_failure_keeps_old_pipeline_failure_behavior(self):
+        class MixedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    time.sleep(0.05)
+                    return json.dumps([{"id": "1", "translation": "你好"}])
+                if '"id": "2",\n    "source": "world"' in prompt:
+                    return "not json"
+                raise AssertionError(f"unexpected prompt: {prompt}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = _write_two_cue_srt(Path(temp_dir))
+            output_dir = Path(temp_dir) / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=2,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", MixedProvider):
+                with self.assertRaisesRegex(RuntimeError, r"(?s)batch_id 2.*1 attempts.*not valid JSON"):
+                    run_translation_pipeline(subtitle_path, config)
+
+            self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+            self.assertFalse((output_dir / "bilingual.srt").exists())
+            self.assertFalse((output_dir / "global_context.md").exists())
+            self.assertFalse((output_dir / "translation_report.md").exists())
+
+    def test_concurrent_batch_failure_does_not_wait_for_earlier_slow_batch(self):
+        class EarlyFailProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if '"id": "1",\n    "source": "hello"' in prompt:
+                    time.sleep(0.35)
+                    return json.dumps([{"id": "1", "translation": "你好"}])
+                if '"id": "2",\n    "source": "world"' in prompt:
+                    raise RuntimeError("provider boom")
+                raise AssertionError(f"unexpected prompt: {prompt}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = _write_two_cue_srt(Path(temp_dir))
+            output_dir = Path(temp_dir) / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                max_retries=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=2,
+            )
+
+            started_at = time.perf_counter()
+            with patch("translation.pipeline.OpenAICompatibleProvider", EarlyFailProvider):
+                with self.assertRaisesRegex(RuntimeError, r"batch_id 2 failed after 1 attempts: provider boom"):
+                    run_translation_pipeline(subtitle_path, config)
+            elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.2)
+        self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+        self.assertFalse((output_dir / "bilingual.srt").exists())
+        self.assertFalse((output_dir / "global_context.md").exists())
+        self.assertFalse((output_dir / "translation_report.md").exists())
+
+    def test_non_runtime_worker_error_also_fails_fast_without_waiting_for_slow_batch(self):
+        class SlowStructuredProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                time.sleep(0.35)
+                return json.dumps([{"cue_id": "valid-1", "translation": "你好"}])
+
+        stable_cue = Cue(id="2", index=1, start="00:00:00,000", end="00:00:01,000", source="before")
+        slow_target_cue = Cue(id="valid-1", index=10, start="00:00:02,000", end="00:00:03,000", source="hello")
+        colliding_target_cue = Cue(id="same", index=2, start="00:00:04,000", end="00:00:05,000", source="world")
+        colliding_after_cue = Cue(id="same", index=3, start="00:00:06,000", end="00:00:07,000", source="after")
+        valid_batch = TranslationBatch(
+            batch_id=1,
+            cues=(slow_target_cue,),
+            context_before=(),
+            context_after=(),
+        )
+        invalid_batch = TranslationBatch(
+            batch_id=2,
+            cues=(colliding_target_cue,),
+            context_before=(stable_cue,),
+            context_after=(colliding_after_cue,),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = _write_two_cue_srt(Path(temp_dir))
+            output_dir = Path(temp_dir) / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=2,
+                engine_version="v2",
+                structured_output=True,
+            )
+
+            started_at = time.perf_counter()
+            with patch("translation.pipeline.parse_subtitle_file", return_value=[slow_target_cue, colliding_target_cue]), patch(
+                "translation.pipeline.create_batches",
+                return_value=(valid_batch, invalid_batch),
+            ), patch("translation.pipeline.OpenAICompatibleProvider", SlowStructuredProvider):
+                with self.assertRaisesRegex(ValueError, "generated non-unique structured cue_ids"):
+                    run_translation_pipeline(subtitle_path, config)
+            elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 0.2)
+        self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
+        self.assertFalse((output_dir / "bilingual.srt").exists())
+        self.assertFalse((output_dir / "global_context.md").exists())
+        self.assertFalse((output_dir / "translation_report.md").exists())
 
     def test_structured_cache_hit_batch_report_marks_cache_hit_true_and_attempt_zero(self):
         class SeedProvider:

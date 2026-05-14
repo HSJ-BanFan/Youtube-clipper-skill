@@ -40,6 +40,7 @@ ENV_MAPPING = {
     "fallback_model_alias": "TRANSLATION_FALLBACK_MODEL_ALIAS",
     "batch_max_chars": "TRANSLATION_BATCH_MAX_CHARS",
     "batch_max_cues": "TRANSLATION_BATCH_MAX_CUES",
+    "concurrency": "TRANSLATION_CONCURRENCY",
     "output_schema_version": "TRANSLATION_OUTPUT_SCHEMA_VERSION",
     "batching_strategy_version": "TRANSLATION_BATCHING_STRATEGY_VERSION",
 }
@@ -71,6 +72,7 @@ class TranslationConfig:
     fallback_model_alias: str = "fallback"
     batch_max_chars: int | None = None
     batch_max_cues: int | None = None
+    concurrency: int = 1
     output_schema_version: str = "v1"
     batching_strategy_version: str = "v1"
     output_dir: str | None = None
@@ -116,6 +118,8 @@ class TranslationConfig:
             raise ValueError("batch_max_chars must be greater than 0 when set")
         if self.batch_max_cues is not None and self.batch_max_cues <= 0:
             raise ValueError("batch_max_cues must be greater than 0 when set")
+        if self.concurrency <= 0:
+            raise ValueError("concurrency must be greater than 0")
         if self.output_schema_version not in VALID_OUTPUT_SCHEMA_VERSIONS:
             valid_output_schema_versions = ", ".join(sorted(VALID_OUTPUT_SCHEMA_VERSIONS))
             raise ValueError(f"output_schema_version must be one of: {valid_output_schema_versions}")
@@ -155,6 +159,7 @@ class TranslationConfig:
             "fallback_model_alias": self.fallback_model_alias,
             "batch_max_chars": self.batch_max_chars,
             "batch_max_cues": self.batch_max_cues,
+            "concurrency": self.concurrency,
             "output_schema_version": self.output_schema_version,
             "batching_strategy_version": self.batching_strategy_version,
             "output_dir": self.output_dir,
@@ -223,6 +228,7 @@ def _coerce_value(field_name: str, raw_value: str) -> Any:
             "max_retries",
             "batch_max_chars",
             "batch_max_cues",
+            "concurrency",
         }:
             return int(raw_value)
         if field_name == "temperature":

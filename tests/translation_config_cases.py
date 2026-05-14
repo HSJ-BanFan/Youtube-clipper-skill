@@ -93,6 +93,38 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertFalse(config.structured_output)
 
+    def test_default_concurrency_is_one(self):
+        config = TranslationConfig()
+
+        self.assertEqual(config.concurrency, 1)
+
+    def test_env_concurrency_loads(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={"TRANSLATION_CONCURRENCY": "4"},
+        )
+
+        self.assertEqual(config.concurrency, 4)
+
+    def test_safe_config_output_includes_concurrency(self):
+        config = TranslationConfig(concurrency=3)
+
+        safe = config.to_safe_dict()
+
+        self.assertEqual(safe["concurrency"], 3)
+
+    def test_concurrency_rejects_non_positive_values(self):
+        with self.assertRaisesRegex(ValueError, "concurrency must be greater than 0"):
+            TranslationConfig(concurrency=0)
+
+        with self.assertRaisesRegex(ValueError, "concurrency must be greater than 0"):
+            load_config(
+                cli_args={},
+                env_path=None,
+                environ={"TRANSLATION_CONCURRENCY": "0"},
+            )
+
     def test_engine_version_rejects_invalid_values(self):
         with self.assertRaisesRegex(ValueError, "engine_version must be one of"):
             TranslationConfig(engine_version="v3")
