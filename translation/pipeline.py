@@ -40,7 +40,6 @@ class BatchStatsDelta:
     cache_hits: int = 0
     cache_misses: int = 0
     retries: int = 0
-    failed_batches: int = 0
 
 
 @dataclass(frozen=True)
@@ -51,10 +50,9 @@ class BatchExecutionResult:
 
 
 class BatchExecutionFailed(RuntimeError):
-    def __init__(self, error: RuntimeError, stats_delta: BatchStatsDelta) -> None:
+    def __init__(self, error: RuntimeError) -> None:
         super().__init__(str(error))
         self.error = error
-        self.stats_delta = stats_delta
 
 
 _CACHE_ACCESS_LOCK = Lock()
@@ -127,20 +125,25 @@ def _run_translation_batches(
     global_context_hash: str,
 ) -> list[BatchExecutionResult]:
     if config.concurrency == 1:
-        return [
-            _execute_translation_batch(
-                batch,
-                config,
-                glossary_text,
-                glossary_hash,
-                global_context_text,
-                global_context_hash,
-            )
-            for batch in batches
-        ]
+        ordered_results: list[BatchExecutionResult] = []
+        for batch in batches:
+            try:
+                ordered_results.append(
+                    _execute_translation_batch(
+                        batch,
+                        config,
+                        glossary_text,
+                        glossary_hash,
+                        global_context_text,
+                        global_context_hash,
+                    )
+                )
+            except BatchExecutionFailed as failure:
+                _raise_batch_runtime_error(failure.error)
+        return ordered_results
 
     cancellation_event = Event()
-    executor = ThreadPoolExecutor(max_workers=config.concurrency)
+    executor = ThreadPoolExecutor(max_workers=min(config.concurrency, len(batches)))
     wait_for_shutdown = True
     try:
         futures = {
@@ -167,7 +170,7 @@ def _run_translation_batches(
                 for pending_future in futures:
                     if pending_future is not future:
                         pending_future.cancel()
-                raise failure.error from failure
+                _raise_batch_runtime_error(failure.error)
             except Exception:
                 cancellation_event.set()
                 wait_for_shutdown = False
@@ -274,7 +277,7 @@ def _execute_translation_batch(
             batch_record=structured_batch_record,
         )
     except RuntimeError as error:
-        raise BatchExecutionFailed(error, _stats_delta_from_stats(local_stats)) from error
+        raise BatchExecutionFailed(error) from error
 
     if cancellation_event is None or not cancellation_event.is_set():
         _write_cached_response(
@@ -348,7 +351,6 @@ def _merge_stats_delta(stats: TranslationStats, stats_delta: BatchStatsDelta) ->
     stats.cache_hits += stats_delta.cache_hits
     stats.cache_misses += stats_delta.cache_misses
     stats.retries += stats_delta.retries
-    stats.failed_batches += stats_delta.failed_batches
 
 
 def _stats_delta_from_stats(stats: TranslationStats) -> BatchStatsDelta:
@@ -357,8 +359,11 @@ def _stats_delta_from_stats(stats: TranslationStats) -> BatchStatsDelta:
         cache_hits=stats.cache_hits,
         cache_misses=stats.cache_misses,
         retries=stats.retries,
-        failed_batches=stats.failed_batches,
     )
+
+
+def _raise_batch_runtime_error(error: RuntimeError) -> None:
+    raise RuntimeError(str(error)) from error
 
 
 class StructuredTranslationError(ValueError):
@@ -640,7 +645,6 @@ def _translate_batch_with_retries(
             last_error = exc
             last_error_type = getattr(exc, "error_type", None)
     stats.retries += max(attempts - 1, 0)
-    stats.failed_batches += 1
     detail = f": {last_error}" if last_error is not None else ""
     raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
 

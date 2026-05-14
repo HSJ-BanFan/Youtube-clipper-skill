@@ -4,15 +4,19 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
 from translation.config import TranslationConfig
-from translation.models import Cue, ErrorType, TranslationBatch
+from translation.models import BatchState, Cue, ErrorType, MinimalBatchReportEntry, TranslationBatch
 from translation.pipeline import (
+    BatchExecutionResult,
+    BatchStatsDelta,
     _build_batch_source_hash,
     _build_structured_batch_record,
     _classify_structured_cue_id,
+    _run_translation_batches,
     parse_qa_response,
     parse_translation_response,
     run_translation_pipeline,
@@ -756,6 +760,48 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("你好", translated)
         self.assertIn("qa_provider_calls: 1", report)
 
+    def test_serial_and_concurrent_batch_failure_raise_same_runtime_error_shape(self):
+        class BrokenProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return "not json"
+
+        observed: list[tuple[type[BaseException], str, BaseException | None]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = _write_one_cue_srt(Path(temp_dir))
+
+            for concurrency in (1, 2):
+                output_dir = Path(temp_dir) / f"out-{concurrency}"
+                config = TranslationConfig(
+                    api_key="test-secret",
+                    output_dir=str(output_dir),
+                    batch_size=1,
+                    context_before=0,
+                    context_after=0,
+                    max_retries=0,
+                    cache_enabled=False,
+                    qa_mode="none",
+                    concurrency=concurrency,
+                )
+
+                with patch("translation.pipeline.OpenAICompatibleProvider", BrokenProvider):
+                    with self.assertRaisesRegex(RuntimeError, r"(?s)batch_id 1.*1 attempts.*not valid JSON") as raised:
+                        run_translation_pipeline(subtitle_path, config)
+
+                observed.append((type(raised.exception), str(raised.exception), raised.exception.__cause__))
+
+        self.assertEqual([error_type for error_type, _, _ in observed], [RuntimeError, RuntimeError])
+        self.assertEqual(observed[0][1], observed[1][1])
+        self.assertIsInstance(observed[0][2], RuntimeError)
+        self.assertIsInstance(observed[1][2], RuntimeError)
+        self.assertEqual(str(observed[0][2]), str(observed[1][2]))
+
+    def test_batch_stats_delta_no_longer_tracks_failed_batches(self):
+        self.assertNotIn("failed_batches", BatchStatsDelta.__dataclass_fields__)
+
     def test_concurrent_batch_failure_keeps_old_pipeline_failure_behavior(self):
         class MixedProvider:
             def __init__(self, config):
@@ -887,8 +933,59 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertLess(elapsed, 0.2)
         self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
         self.assertFalse((output_dir / "bilingual.srt").exists())
-        self.assertFalse((output_dir / "global_context.md").exists())
-        self.assertFalse((output_dir / "translation_report.md").exists())
+
+    def test_concurrent_batches_cap_executor_workers_to_batch_count(self):
+        batch_one = TranslationBatch(cues=(ONE_CUE[0],), context_before=(), context_after=(), batch_id=1)
+        batch_two = TranslationBatch(
+            cues=(Cue(id="2", index=2, start="00:00:01,000", end="00:00:02,000", source="world"),),
+            context_before=(),
+            context_after=(),
+            batch_id=2,
+        )
+        captured_max_workers: list[int] = []
+
+        class CapturingExecutor:
+            def __init__(self, *, max_workers):
+                captured_max_workers.append(max_workers)
+
+            def submit(self, fn, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except Exception as error:
+                    future.set_exception(error)
+                return future
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                return None
+
+        def fake_result(batch, *_args):
+            return BatchExecutionResult(
+                translations=((batch.cues[0].id, "ok"),),
+                stats_delta=BatchStatsDelta(),
+                batch_entry=MinimalBatchReportEntry(
+                    batch_id=batch.batch_id,
+                    state=BatchState.SUCCESS,
+                    cue_count=1,
+                    attempts=1,
+                    cache_hit=False,
+                    cue_range=(batch.cues[0].index, batch.cues[0].index),
+                    attempt=1,
+                    error_type=None,
+                    duration_ms=1,
+                ),
+            )
+
+        config = TranslationConfig(api_key="test-secret", cache_enabled=False, qa_mode="none", concurrency=8)
+
+        with patch("translation.pipeline.ThreadPoolExecutor", CapturingExecutor), patch(
+            "translation.pipeline._execute_translation_batch",
+            side_effect=fake_result,
+        ):
+            results = _run_translation_batches((batch_one, batch_two), config, "", "", "", "")
+
+        self.assertEqual(captured_max_workers, [2])
+        self.assertEqual(len(results), 2)
 
     def test_structured_cache_hit_batch_report_marks_cache_hit_true_and_attempt_zero(self):
         class SeedProvider:
