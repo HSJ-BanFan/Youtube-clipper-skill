@@ -83,6 +83,40 @@ class TranslationConfigTests(unittest.TestCase):
         self.assertNotIn("env-secret", str(safe))
         self.assertNotIn("env-secret", repr(config))
 
+    def test_default_engine_version_is_v1(self):
+        config = TranslationConfig()
+
+        self.assertEqual(config.engine_version, "v1")
+
+    def test_default_structured_output_is_false(self):
+        config = TranslationConfig()
+
+        self.assertFalse(config.structured_output)
+
+    def test_engine_version_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "engine_version must be one of"):
+            TranslationConfig(engine_version="v3")
+
+    def test_safe_config_output_does_not_leak_api_key_with_new_fields(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={
+                "TRANSLATION_API_KEY": "env-secret",
+                "TRANSLATION_ENGINE_VERSION": "v2",
+                "TRANSLATION_STRUCTURED_OUTPUT": "false",
+                "TRANSLATION_FAILURE_MODE": "strict",
+            },
+        )
+
+        safe = config.to_safe_dict()
+
+        self.assertEqual(safe["engine_version"], "v2")
+        self.assertFalse(safe["structured_output"])
+        self.assertEqual(safe["failure_mode"], "strict")
+        self.assertNotIn("api_key", safe)
+        self.assertNotIn("env-secret", str(safe))
+
     def test_system_environment_values_override_env_file_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
@@ -193,6 +227,54 @@ class TranslationConfigTests(unittest.TestCase):
             result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
 
         self.assertEqual(result.first_cue_preview, "你好 world")
+
+    def test_new_config_fields_do_not_change_default_runtime_behavior(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:01,000\n"
+                "hello\nworld\n\n"
+                "2\n"
+                "00:00:02,000 --> 00:00:03,000\n"
+                "done\n\n",
+                encoding="utf-8",
+            )
+
+            config = TranslationConfig(dry_run=True)
+            result = run_translation_pipeline(subtitle_path, config)
+
+        self.assertEqual(config.engine_version, "v1")
+        self.assertFalse(config.structured_output)
+        self.assertEqual(result.cue_count, 2)
+        self.assertFalse(result.provider_called)
+        self.assertEqual(result.first_cue_preview, "hello world")
+        self.assertEqual(result.last_cue_preview, "done")
+
+    def test_v2_false_does_not_enable_structured_parser_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n"
+                "00:00:00,000 --> 00:00:01,000\n"
+                "hello\nworld\n\n"
+                "2\n"
+                "00:00:02,000 --> 00:00:03,000\n"
+                "done\n\n",
+                encoding="utf-8",
+            )
+
+            default_result = run_translation_pipeline(subtitle_path, TranslationConfig(dry_run=True))
+            gated_off_result = run_translation_pipeline(
+                subtitle_path,
+                TranslationConfig(dry_run=True, engine_version="v2", structured_output=False),
+            )
+
+        self.assertEqual(default_result.cue_count, gated_off_result.cue_count)
+        self.assertEqual(default_result.provider_called, gated_off_result.provider_called)
+        self.assertEqual(default_result.first_cue_preview, gated_off_result.first_cue_preview)
+        self.assertEqual(default_result.last_cue_preview, gated_off_result.last_cue_preview)
+        self.assertEqual(default_result.output_format, gated_off_result.output_format)
 
     def test_non_dry_run_requires_api_key_after_parser_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

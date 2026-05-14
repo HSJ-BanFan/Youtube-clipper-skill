@@ -4,14 +4,21 @@ import hashlib
 import json
 import unicodedata
 from pathlib import Path
+from time import perf_counter
 
 from translation.batching import create_batches
 from translation.cache import CacheEntry, TranslationCache, build_batch_cache_key
 from translation.config import TranslationConfig
 from translation.context import build_global_context, write_global_context
 from translation.glossary import load_glossary
-from translation.models import Cue, PipelineResult, TranslationBatch, TranslationOutputPaths
-from translation.prompts import QA_PROMPT_VERSION, PROMPT_VERSION, build_suspicious_qa_prompt, build_translation_prompt
+from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorType, MinimalBatchReportEntry, PipelineResult, TranslationBatch, TranslationOutputPaths
+from translation.prompts import (
+    QA_PROMPT_VERSION,
+    PROMPT_VERSION,
+    build_structured_translation_prompt,
+    build_suspicious_qa_prompt,
+    build_translation_prompt,
+)
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
 from translation.qa import QACandidate, find_suspicious_translations
 from translation.report import QAStats, TranslationStats, write_translation_report
@@ -61,12 +68,26 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     try:
         for batch in batches:
-            prompt = build_translation_prompt(
-                batch,
-                config.target_lang,
-                glossary.text,
-                global_context.text,
-            )
+            batch_started_at = perf_counter()
+            translation_id_key = "id"
+            structured_batch_record: BatchRecord | None = None
+            if config.engine_version == "v2" and config.structured_output:
+                translation_id_key = "cue_id"
+                structured_batch_record = _build_structured_batch_record(batch)
+                prompt = build_structured_translation_prompt(
+                    batch,
+                    config.target_lang,
+                    glossary.text,
+                    global_context.text,
+                    batch_record=structured_batch_record,
+                )
+            else:
+                prompt = build_translation_prompt(
+                    batch,
+                    config.target_lang,
+                    glossary.text,
+                    global_context.text,
+                )
             batch_source_hash = _build_batch_source_hash(prompt)
             cache_key = build_batch_cache_key(
                 config.provider,
@@ -80,19 +101,44 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
             cached_json = cache.get(cache_key) if cache is not None else None
             if cached_json is not None:
                 try:
-                    batch_translations = parse_translation_response(cached_json, batch.cues, batch.batch_id)
+                    batch_translations = parse_translation_response(
+                        cached_json,
+                        batch.cues,
+                        batch.batch_id,
+                        translation_id_key=translation_id_key,
+                        batch_record=structured_batch_record,
+                    )
                 except ValueError:
                     stats.cache_misses += 1
                 else:
                     stats.cache_hits += 1
                     all_translations.update(batch_translations)
+                    _append_batch_report_entry(
+                        stats,
+                        batch,
+                        BatchState.SUCCESS,
+                        0,
+                        True,
+                        None,
+                        _duration_ms(batch_started_at),
+                    )
                     continue
             elif cache is not None:
                 stats.cache_misses += 1
 
             if provider is None:
                 provider = OpenAICompatibleProvider(config)
-            response_text, batch_translations = _translate_batch_with_retries(provider, prompt, batch, config, stats)
+            retries_before = stats.retries
+            response_text, batch_translations, batch_error_type = _translate_batch_with_retries(
+                provider,
+                prompt,
+                batch,
+                config,
+                stats,
+                translation_id_key=translation_id_key,
+                batch_record=structured_batch_record,
+            )
+            attempts_used = stats.retries - retries_before + 1
             if cache is not None:
                 cache.set(
                     CacheEntry(
@@ -108,6 +154,15 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
                     )
                 )
             all_translations.update(batch_translations)
+            _append_batch_report_entry(
+                stats,
+                batch,
+                BatchState.SUCCESS,
+                attempts_used,
+                False,
+                batch_error_type,
+                _duration_ms(batch_started_at),
+            )
     finally:
         if cache is not None:
             cache.close()
@@ -133,16 +188,31 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     return result
 
 
+class StructuredTranslationError(ValueError):
+    def __init__(self, batch_id: int, error_type: ErrorType, detail: str) -> None:
+        super().__init__(f"batch_id {batch_id} {detail}")
+        self.error_type = error_type
+
+
+
 def parse_translation_response(
     response_text: str,
     expected_cues: list[Cue] | tuple[Cue, ...],
     batch_id: int,
+    translation_id_key: str = "id",
+    batch_record: BatchRecord | None = None,
 ) -> dict[str, str]:
     stripped = _strip_json_fence(response_text)
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
+        if batch_record is not None and translation_id_key == "cue_id":
+            raise _structured_translation_error(batch_id, ErrorType.INVALID_JSON, "translation response is not valid JSON") from exc
         raise ValueError(f"batch_id {batch_id} translation response is not valid JSON") from exc
+
+    if batch_record is not None and translation_id_key == "cue_id":
+        structured_translations = _parse_structured_translation_response(payload, batch_record, batch_id)
+        return _reconcile_structured_translations(expected_cues, batch_record, structured_translations)
 
     if not isinstance(payload, list):
         raise ValueError(f"batch_id {batch_id} translation response must be a JSON array")
@@ -155,10 +225,10 @@ def parse_translation_response(
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError(f"batch_id {batch_id} translation item must be an object")
-        cue_id = item.get("id")
+        cue_id = item.get(translation_id_key)
         translation = item.get("translation")
         if not isinstance(cue_id, str):
-            raise ValueError(f"batch_id {batch_id} translation item id must be a string")
+            raise ValueError(f"batch_id {batch_id} translation item {translation_id_key} must be a string")
         if not isinstance(translation, str):
             raise ValueError(f"batch_id {batch_id} cue id {cue_id} translation must be a string")
         translations[cue_id] = translation
@@ -191,6 +261,84 @@ def _validate_batch_translations(cues: list[Cue] | tuple[Cue, ...], translations
             raise ValueError(f"missing translation for cue id {cue.id}")
         if not translations[cue.id].strip():
             raise ValueError(f"translation for cue id {cue.id} is empty")
+
+
+def _reconcile_structured_translations(
+    expected_cues: list[Cue] | tuple[Cue, ...],
+    batch_record: BatchRecord,
+    translations: dict[str, str],
+) -> dict[str, str]:
+    reconciled: dict[str, str] = {}
+    for cue, cue_record in zip(expected_cues, batch_record.target_cues, strict=True):
+        reconciled[cue.id] = translations[cue_record.cue_id]
+
+    try:
+        _validate_batch_translations(expected_cues, reconciled)
+    except ValueError as exc:
+        raise ValueError(f"batch_id {batch_record.batch_id} {exc}") from exc
+    return reconciled
+
+
+
+def _parse_structured_translation_response(
+    payload: object,
+    batch_record: BatchRecord,
+    batch_id: int,
+) -> dict[str, str]:
+    if not isinstance(payload, list):
+        raise _structured_translation_error(batch_id, ErrorType.SCHEMA_MISMATCH, "translation response must be a JSON array")
+    if len(payload) != len(batch_record.target_cues):
+        raise _structured_translation_error(
+            batch_id,
+            ErrorType.SCHEMA_MISMATCH,
+            f"translation count {len(payload)} does not match cue count {len(batch_record.target_cues)}",
+        )
+
+    expected_item_keys = {"cue_id", "translation"}
+    target_cue_ids = {cue.cue_id for cue in batch_record.target_cues}
+    context_cue_ids = {cue.cue_id for cue in batch_record.context_before} | {
+        cue.cue_id for cue in batch_record.context_after
+    }
+    translations: dict[str, str] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            raise _structured_translation_error(batch_id, ErrorType.SCHEMA_MISMATCH, "translation item must be an object")
+        if set(item) != expected_item_keys:
+            raise _structured_translation_error(
+                batch_id,
+                ErrorType.SCHEMA_MISMATCH,
+                "translation item keys must exactly match cue_id and translation",
+            )
+        cue_id = item["cue_id"]
+        translation = item["translation"]
+        if not isinstance(cue_id, str) or not cue_id.strip():
+            raise _structured_translation_error(batch_id, ErrorType.MISSING_REQUIRED_CUE_ID, "translation item cue_id must be a non-empty string")
+        if cue_id in translations:
+            raise _structured_translation_error(batch_id, ErrorType.DUPLICATE_CUE_ID, f"duplicate cue_id {cue_id}")
+        classification = _classify_structured_cue_id(
+            batch_record,
+            cue_id,
+            target_cue_ids=target_cue_ids,
+            context_cue_ids=context_cue_ids,
+        )
+        if classification is not None:
+            raise _structured_translation_error(batch_id, classification, f"unexpected cue_id {cue_id}")
+        if not isinstance(translation, str):
+            raise _structured_translation_error(batch_id, ErrorType.SCHEMA_MISMATCH, f"cue_id {cue_id} translation must be a string")
+        if not translation.strip():
+            raise _structured_translation_error(batch_id, ErrorType.EMPTY_TRANSLATION, f"translation for cue_id {cue_id} is empty")
+        translations[cue_id] = translation
+
+    returned_cue_ids = set(translations)
+    if returned_cue_ids != target_cue_ids:
+        missing_cue_ids = sorted(target_cue_ids - returned_cue_ids)
+        missing = missing_cue_ids[0] if missing_cue_ids else "unknown"
+        raise _structured_translation_error(batch_id, ErrorType.MISSING_REQUIRED_CUE_ID, f"missing translation for cue_id {missing}")
+    return translations
+
+
+def _structured_translation_error(batch_id: int, error_type: ErrorType, detail: str) -> StructuredTranslationError:
+    return StructuredTranslationError(batch_id, error_type, detail)
 
 
 def parse_qa_response(
@@ -251,6 +399,36 @@ def build_output_paths(input_path: Path, config: TranslationConfig) -> Translati
     )
 
 
+def _append_batch_report_entry(
+    stats: TranslationStats,
+    batch: TranslationBatch,
+    state: BatchState,
+    attempt: int,
+    cache_hit: bool,
+    error_type: ErrorType | None,
+    duration_ms: int,
+) -> None:
+    stats.batch_entries.append(
+        MinimalBatchReportEntry(
+            batch_id=batch.batch_id,
+            state=state,
+            cue_count=len(batch.cues),
+            attempts=attempt,
+            cache_hit=cache_hit,
+            cue_range=(batch.cues[0].index, batch.cues[-1].index),
+            attempt=attempt,
+            error_type=error_type,
+            duration_ms=duration_ms,
+        )
+    )
+
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(int((perf_counter() - started_at) * 1000), 0)
+
+
+
 def _run_suspicious_qa(
     cues: list[Cue],
     translations: dict[str, str],
@@ -291,22 +469,85 @@ def _translate_batch_with_retries(
     batch: TranslationBatch,
     config: TranslationConfig,
     stats: TranslationStats,
-) -> tuple[str, dict[str, str]]:
+    translation_id_key: str = "id",
+    batch_record: BatchRecord | None = None,
+) -> tuple[str, dict[str, str], ErrorType | None]:
     attempts = _attempt_count(config)
     last_error: Exception | None = None
+    last_error_type: ErrorType | None = None
     for attempt in range(1, attempts + 1):
         try:
             stats.provider_calls += 1
             response_text = provider.translate_batch(prompt)
-            translations = parse_translation_response(response_text, batch.cues, batch.batch_id)
+            translations = parse_translation_response(
+                response_text,
+                batch.cues,
+                batch.batch_id,
+                translation_id_key=translation_id_key,
+                batch_record=batch_record,
+            )
             stats.retries += attempt - 1
-            return response_text, translations
+            return response_text, translations, last_error_type
         except (RuntimeError, ValueError) as exc:
             last_error = exc
+            last_error_type = getattr(exc, "error_type", None)
     stats.retries += max(attempts - 1, 0)
     stats.failed_batches += 1
     detail = f": {last_error}" if last_error is not None else ""
     raise RuntimeError(f"batch_id {batch.batch_id} failed after {attempts} attempts{detail}") from last_error
+
+
+def _build_structured_batch_record(batch: TranslationBatch) -> BatchRecord:
+    cues_in_namespace = batch.context_before + batch.cues + batch.context_after
+    stable_id_counts: dict[str, int] = {}
+    for cue in cues_in_namespace:
+        candidate = cue.id.strip()
+        if candidate:
+            stable_id_counts[candidate] = stable_id_counts.get(candidate, 0) + 1
+
+    cue_records: dict[Cue, CueRecord] = {}
+    for cue in cues_in_namespace:
+        candidate = cue.id.strip()
+        cue_id = candidate if candidate and stable_id_counts[candidate] == 1 else str(cue.index)
+        cue_records[cue] = CueRecord(
+            cue_id=cue_id,
+            original_index=cue.index,
+            start=cue.start,
+            end=cue.end,
+            source_text=cue.source,
+            raw_timing=cue.raw_timing,
+            note=cue.note,
+        )
+
+    generated_cue_ids = {record.cue_id for record in cue_records.values()}
+    if len(generated_cue_ids) != len(cue_records):
+        raise ValueError(f"batch_id {batch.batch_id} generated non-unique structured cue_ids")
+
+    return BatchRecord(
+        batch_id=batch.batch_id,
+        target_cues=tuple(cue_records[cue] for cue in batch.cues),
+        context_before=tuple(cue_records[cue] for cue in batch.context_before),
+        context_after=tuple(cue_records[cue] for cue in batch.context_after),
+        status=BatchState.PENDING,
+    )
+
+
+def _classify_structured_cue_id(
+    batch_record: BatchRecord,
+    cue_id: str,
+    target_cue_ids: set[str] | None = None,
+    context_cue_ids: set[str] | None = None,
+) -> ErrorType | None:
+    resolved_target_cue_ids = target_cue_ids or {cue.cue_id for cue in batch_record.target_cues}
+    if cue_id in resolved_target_cue_ids:
+        return None
+
+    resolved_context_cue_ids = context_cue_ids or ({cue.cue_id for cue in batch_record.context_before} | {
+        cue.cue_id for cue in batch_record.context_after
+    })
+    if cue_id in resolved_context_cue_ids:
+        return ErrorType.CONTEXT_CUE_OUTPUT_VIOLATION
+    return ErrorType.INVALID_CUE_ID
 
 
 def _build_batch_source_hash(prompt: str) -> str:

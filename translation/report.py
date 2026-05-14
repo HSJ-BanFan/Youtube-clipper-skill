@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
-from translation.models import PipelineResult
+from translation.models import MinimalBatchReportEntry, PipelineResult
 from translation.qa import QAIssue
 
 
@@ -31,6 +31,7 @@ class TranslationStats:
     cache_misses: int = 0
     retries: int = 0
     failed_batches: int = 0
+    batch_entries: list[MinimalBatchReportEntry] = field(default_factory=list)
     qa: QAStats | None = None
 
 
@@ -58,6 +59,16 @@ def write_translation_report(
         "cache_enabled": safe_config["cache_enabled"],
         "cache_path": safe_config["cache_path"],
         "glossary_path": _safe_glossary_path(glossary, safe_config),
+        "engine_version": safe_config["engine_version"],
+        "structured_output": safe_config["structured_output"],
+        "failure_mode": safe_config["failure_mode"],
+        "main_model_alias": safe_config["main_model_alias"],
+        "repair_model_alias": safe_config["repair_model_alias"],
+        "fallback_model_alias": safe_config["fallback_model_alias"],
+        "batch_max_chars": safe_config["batch_max_chars"],
+        "batch_max_cues": safe_config["batch_max_cues"],
+        "output_schema_version": safe_config["output_schema_version"],
+        "batching_strategy_version": safe_config["batching_strategy_version"],
         "glossary_hash": glossary.hash,
         "context_hash": context.hash,
         "total_batches": stats.total_batches,
@@ -75,7 +86,7 @@ def write_translation_report(
     }
     qa = stats.qa or QAStats(qa_mode=config.qa_mode)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_report(entries, qa), encoding="utf-8")
+    path.write_text(_render_report(entries, qa, stats.batch_entries), encoding="utf-8")
 
 
 def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str | Path | None:
@@ -84,7 +95,7 @@ def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str 
     return safe_config["glossary_path"]
 
 
-def _render_report(entries: dict[str, Any], qa: QAStats) -> str:
+def _render_report(entries: dict[str, Any], qa: QAStats, batch_entries: Sequence[MinimalBatchReportEntry]) -> str:
     lines = ["# Translation Report", ""]
     lines.extend(f"- {key}: {value}" for key, value in entries.items())
     lines.extend(
@@ -106,5 +117,20 @@ def _render_report(entries: dict[str, Any], qa: QAStats) -> str:
         lines.extend(f"- {issue.cue_id} | {issue.severity} | {issue.reason}" for issue in qa.issues)
     else:
         lines.append("- none")
+    if batch_entries:
+        lines.extend(["", "## Batch Results"])
+        lines.extend(_render_batch_entry(entry) for entry in batch_entries)
     lines.append("")
     return "\n".join(lines)
+
+
+
+def _render_batch_entry(entry: MinimalBatchReportEntry) -> str:
+    cue_range = "none" if entry.cue_range is None else f"{entry.cue_range[0]}-{entry.cue_range[1]}"
+    attempt = entry.attempt if entry.attempt is not None else entry.attempts
+    error_type = entry.error_type.value if entry.error_type is not None else "none"
+    duration_ms = "none" if entry.duration_ms is None else str(entry.duration_ms)
+    return (
+        f"- batch_id: {entry.batch_id} | cue_range: {cue_range} | status: {entry.state.value} "
+        f"| attempt: {attempt} | error_type: {error_type} | cache_hit: {entry.cache_hit} | duration_ms: {duration_ms}"
+    )

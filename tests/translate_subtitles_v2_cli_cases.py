@@ -117,6 +117,43 @@ class TranslateSubtitlesV2CliTests(unittest.TestCase):
         self.assertIn("already exists", result.stderr)
         self.assertIn("--overwrite", result.stderr)
 
+    def test_dry_run_prints_passive_feature_gate_fields_without_leaking_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
+                encoding="utf-8",
+            )
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                "TRANSLATION_API_KEY=env-secret\n"
+                "TRANSLATION_ENGINE_VERSION=v2\n"
+                "TRANSLATION_STRUCTURED_OUTPUT=false\n"
+                "TRANSLATION_FAILURE_MODE=strict\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(subtitle_path),
+                    "--env-file",
+                    str(env_path),
+                    "--dry-run",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("engine_version: v2", result.stdout)
+        self.assertIn("structured_output: False", result.stdout)
+        self.assertIn("failure_mode: strict", result.stdout)
+        self.assertNotIn("env-secret", result.stdout)
+
     def test_overwrite_allows_dry_run_when_output_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             subtitle_path = Path(temp_dir) / "sample.srt"
