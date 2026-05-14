@@ -1802,11 +1802,12 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
 
                     def __init__(self, config):
                         self.config = config
+                        self.error_type = error_type
 
                     def translate_batch(self, prompt):
                         FakeProvider.calls_by_model.append(self.config.model)
                         if self.config.model == "main-model":
-                            raise ProviderError(error_type, f"main failed: {error_type.value}")
+                            raise ProviderError(self.error_type, f"main failed: {self.error_type.value}")
                         return json.dumps(
                             [
                                 {"id": "1", "translation": "你好"},
