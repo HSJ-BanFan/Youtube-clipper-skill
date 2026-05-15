@@ -210,6 +210,8 @@ python3 scripts/translate_subtitles_v2.py \
   - 简洁流畅（避免冗长）
 - 输出: `$CLIP_DIR/bilingual.srt`
 - 报告: `$CLIP_DIR/translation_report.md`
+- 全局上下文: `$CLIP_DIR/global_context.md`
+- **Release pass 检查**: 查看 `translation_report.md` 中 `Run Summary` 里的 `final_status`，以及 `Warnings`、`Provider / Fallback Summary`、`Concurrency Summary`、`QA Summary`
 
 #### 5.4 双语字幕文件（如果用户选择）
 - 由 `translate_subtitles_v2.py --output "$CLIP_DIR/bilingual.srt"` 生成
@@ -270,6 +272,8 @@ python3 scripts/generate_summary.py <chapter_info>
    ├── <章节标题>_clip.mp4              # 原始剪辑（无字幕）
    ├── <章节标题>_with_subtitles.mp4   # 烧录字幕版本
    ├── <章节标题>_bilingual.srt        # 双语字幕文件
+   ├── translation_report.md           # Translation V2 报告
+   ├── global_context.md               # 运行时全局上下文摘要
    └── <章节标题>_summary.md           # 总结文案
    ```
 
