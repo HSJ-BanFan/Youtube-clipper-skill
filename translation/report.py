@@ -10,6 +10,8 @@ from translation.glossary import Glossary
 from translation.models import MinimalBatchReportEntry, PipelineResult
 from translation.qa import QAIssue
 
+REPORT_SCHEMA_VERSION = "translation-v2-report-v2"
+
 
 @dataclass
 class QAStats:
@@ -49,50 +51,9 @@ def write_translation_report(
     context: GlobalContext,
 ) -> None:
     safe_config = config.to_safe_dict()
-    entries = {
-        "input_path": result.input_path,
-        "input_format": result.input_format,
-        "output_format": result.output_format,
-        "cue_count": result.cue_count,
-        "target_lang": safe_config["target_lang"],
-        "model": safe_config["model"],
-        "provider": safe_config["provider"],
-        "base_url": safe_config["base_url"],
-        "batch_size": safe_config["batch_size"],
-        "context_before": safe_config["context_before"],
-        "context_after": safe_config["context_after"],
-        "cache_enabled": safe_config["cache_enabled"],
-        "cache_path": safe_config["cache_path"],
-        "glossary_path": _safe_glossary_path(glossary, safe_config),
-        "engine_version": safe_config["engine_version"],
-        "structured_output": safe_config["structured_output"],
-        "failure_mode": safe_config["failure_mode"],
-        "main_model_alias": safe_config["main_model_alias"],
-        "repair_model_alias": safe_config["repair_model_alias"],
-        "fallback_model_alias": safe_config["fallback_model_alias"],
-        "batch_max_chars": safe_config["batch_max_chars"],
-        "batch_max_cues": safe_config["batch_max_cues"],
-        "output_schema_version": safe_config["output_schema_version"],
-        "batching_strategy_version": safe_config["batching_strategy_version"],
-        "glossary_hash": glossary.hash,
-        "context_hash": context.hash,
-        "total_batches": stats.total_batches,
-        "provider_calls": stats.provider_calls,
-        "fallback_provider_calls": stats.fallback_provider_calls,
-        "cache_hits": stats.cache_hits,
-        "cache_misses": stats.cache_misses,
-        "retries": stats.retries,
-        "failed_batches": stats.failed_batches,
-        "output_dir": result.output_paths.output_dir,
-        "translated_srt": result.output_paths.translated_srt,
-        "bilingual_srt": result.output_paths.bilingual_srt,
-        "translation_report": result.output_paths.translation_report,
-        "global_context": result.output_paths.global_context,
-        "glossary_truncated": glossary.truncated,
-    }
     qa = stats.qa or QAStats(qa_mode=config.qa_mode)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_report(entries, qa, stats.batch_entries), encoding="utf-8")
+    path.write_text(_render_report(result, safe_config, stats, glossary, context, qa), encoding="utf-8")
 
 
 def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str | Path | None:
@@ -101,38 +62,219 @@ def _safe_glossary_path(glossary: Glossary, safe_config: dict[str, Any]) -> str 
     return safe_config["glossary_path"]
 
 
-def _render_report(entries: dict[str, Any], qa: QAStats, batch_entries: Sequence[MinimalBatchReportEntry]) -> str:
-    lines = ["# Translation Report", ""]
-    lines.extend(f"- {key}: {value}" for key, value in entries.items())
-    lines.extend(
-        [
-            "",
-            "## QA",
-            f"- qa_mode: {qa.qa_mode}",
-            f"- qa_candidates: {qa.qa_candidates}",
-            f"- qa_reviewed: {qa.qa_reviewed}",
-            f"- qa_provider_calls: {qa.qa_provider_calls}",
-            f"- qa_fixed: {qa.qa_fixed}",
-            f"- qa_kept: {qa.qa_kept}",
-            f"- qa_failed: {qa.qa_failed}",
-            f"- qa_parser_failures: {qa.qa_parser_failures}",
-            f"- qa_provider_failures: {qa.qa_provider_failures}",
-            f"- qa_skipped: {qa.qa_skipped}",
-            f"- qa_prompt_version: {qa.qa_prompt_version}",
-            "",
-            "## QA Issues",
-        ]
-    )
-    if qa.issues:
-        lines.extend(f"- {issue.cue_id} | {issue.severity} | {issue.reason}" for issue in qa.issues)
-    else:
-        lines.append("- none")
-    if batch_entries:
-        lines.extend(["", "## Batch Results"])
-        lines.extend(_render_batch_entry(entry) for entry in batch_entries)
+def _render_report(
+    result: PipelineResult,
+    safe_config: dict[str, Any],
+    stats: TranslationStats,
+    glossary: Glossary,
+    context: GlobalContext,
+    qa: QAStats,
+) -> str:
+    lines = ["# Translation Report", "", f"- report_schema_version: {REPORT_SCHEMA_VERSION}"]
+    lines.extend(_render_section("Run Summary", _run_summary_entries(result, stats)))
+    lines.extend(_render_section("Config Snapshot", _config_snapshot_entries(safe_config, glossary, context)))
+    lines.extend(_render_section("Cache Summary", _cache_summary_entries(safe_config, stats)))
+    lines.extend(_render_section("Provider / Fallback Summary", _provider_summary_entries(safe_config, stats)))
+    lines.extend(_render_section("Concurrency Summary", _concurrency_summary_entries(safe_config)))
+    lines.extend(_render_section("Shrink-Batch Summary", _shrink_summary_entries(stats.batch_entries)))
+    lines.extend(_render_section("QA Summary", _qa_summary_entries(qa)))
+    lines.extend(_render_section("QA", _qa_summary_entries(qa)))
+    lines.extend(_render_section("QA Issues", _qa_issue_entries(qa)))
+    lines.extend(_render_section("Batch Summary", _batch_summary_entries(stats.batch_entries)))
+    batch_details = _batch_detail_entries(stats.batch_entries)
+    lines.extend(_render_section("Batch Details", batch_details))
+    lines.extend(_render_section("Batch Results", batch_details))
+    lines.extend(_render_section("Terminal / Failure Summary", _terminal_summary_entries(stats, stats.batch_entries)))
+    lines.extend(_render_section("Warnings", _warning_entries(stats, qa, stats.batch_entries)))
+    lines.extend(_render_section("Output Artifacts", _output_artifact_entries(result, glossary)))
     lines.append("")
     return "\n".join(lines)
 
+
+def _render_section(title: str, entries: Sequence[str]) -> list[str]:
+    lines = ["", f"## {title}"]
+    if entries:
+        lines.extend(entries)
+    else:
+        lines.append("- none")
+    return lines
+
+
+def _run_summary_entries(result: PipelineResult, stats: TranslationStats) -> list[str]:
+    final_status = "success" if stats.failed_batches == 0 else "completed_with_failures"
+    return [
+        f"- input_path: {result.input_path}",
+        f"- input_format: {result.input_format}",
+        f"- output_format: {result.output_format}",
+        f"- cue_count: {result.cue_count}",
+        f"- dry_run: {result.dry_run}",
+        f"- provider_called: {result.provider_called}",
+        f"- total_batches: {stats.total_batches}",
+        f"- provider_calls: {stats.provider_calls}",
+        f"- cache_hits: {stats.cache_hits}",
+        f"- cache_misses: {stats.cache_misses}",
+        f"- retries: {stats.retries}",
+        f"- failed_batches: {stats.failed_batches}",
+        f"- final_status: {final_status}",
+    ]
+
+
+def _config_snapshot_entries(safe_config: dict[str, Any], glossary: Glossary, context: GlobalContext) -> list[str]:
+    return [
+        f"- target_lang: {safe_config['target_lang']}",
+        f"- model: {safe_config['model']}",
+        f"- review_model: {safe_config['review_model']}",
+        f"- effective_review_model: {safe_config['effective_review_model']}",
+        f"- base_url: {safe_config['base_url']}",
+        f"- mode: {safe_config['mode']}",
+        f"- batch_size: {safe_config['batch_size']}",
+        f"- context_before: {safe_config['context_before']}",
+        f"- context_after: {safe_config['context_after']}",
+        f"- temperature: {safe_config['temperature']}",
+        f"- max_retries: {safe_config['max_retries']}",
+        f"- glossary_path: {_safe_glossary_path(glossary, safe_config)}",
+        f"- qa_mode: {safe_config['qa_mode']}",
+        f"- engine_version: {safe_config['engine_version']}",
+        f"- structured_output: {safe_config['structured_output']}",
+        f"- failure_mode: {safe_config['failure_mode']}",
+        f"- main_model_alias: {safe_config['main_model_alias']}",
+        f"- repair_model_alias: {safe_config['repair_model_alias']}",
+        f"- fallback_model_alias: {safe_config['fallback_model_alias']}",
+        f"- fallback_model: {safe_config['fallback_model']}",
+        f"- batch_max_chars: {safe_config['batch_max_chars']}",
+        f"- batch_max_cues: {safe_config['batch_max_cues']}",
+        f"- output_schema_version: {safe_config['output_schema_version']}",
+        f"- batching_strategy_version: {safe_config['batching_strategy_version']}",
+        f"- glossary_hash: {glossary.hash}",
+        f"- context_hash: {context.hash}",
+    ]
+
+
+def _cache_summary_entries(safe_config: dict[str, Any], stats: TranslationStats) -> list[str]:
+    return [
+        f"- cache_enabled: {safe_config['cache_enabled']}",
+        f"- cache_path: {safe_config['cache_path']}",
+        f"- cache_hits: {stats.cache_hits}",
+        f"- cache_misses: {stats.cache_misses}",
+        "- cache_scope: translation-stage only",
+    ]
+
+
+def _provider_summary_entries(safe_config: dict[str, Any], stats: TranslationStats) -> list[str]:
+    return [
+        f"- provider: {safe_config['provider']}",
+        f"- model: {safe_config['model']}",
+        f"- effective_review_model: {safe_config['effective_review_model']}",
+        f"- provider_calls: {stats.provider_calls}",
+        f"- fallback_provider_calls: {stats.fallback_provider_calls}",
+        f"- main_model_alias: {safe_config['main_model_alias']}",
+        f"- repair_model_alias: {safe_config['repair_model_alias']}",
+        f"- fallback_model_alias: {safe_config['fallback_model_alias']}",
+    ]
+
+
+def _concurrency_summary_entries(safe_config: dict[str, Any]) -> list[str]:
+    return [
+        f"- concurrency: {safe_config['concurrency']}",
+        f"- engine_version: {safe_config['engine_version']}",
+        f"- structured_output: {safe_config['structured_output']}",
+    ]
+
+
+def _shrink_summary_entries(batch_entries: Sequence[MinimalBatchReportEntry]) -> list[str]:
+    parent_batches_split = sum(1 for entry in batch_entries if entry.child_batch_ids or entry.split_reason is not None)
+    child_batches_spawned = sum(len(entry.child_batch_ids) for entry in batch_entries)
+    split_reasons = sorted({entry.split_reason for entry in batch_entries if entry.split_reason})
+    split_attempts = [entry.split_attempt for entry in batch_entries if entry.split_attempt is not None]
+    return [
+        f"- parent_batches_split: {parent_batches_split}",
+        f"- child_batches_spawned: {child_batches_spawned}",
+        f"- split_reasons: {','.join(split_reasons) if split_reasons else 'none'}",
+        f"- max_split_attempt: {max(split_attempts) if split_attempts else 'none'}",
+    ]
+
+
+def _qa_summary_entries(qa: QAStats) -> list[str]:
+    return [
+        f"- qa_mode: {qa.qa_mode}",
+        f"- qa_candidates: {qa.qa_candidates}",
+        f"- qa_reviewed: {qa.qa_reviewed}",
+        f"- qa_provider_calls: {qa.qa_provider_calls}",
+        f"- qa_fixed: {qa.qa_fixed}",
+        f"- qa_kept: {qa.qa_kept}",
+        f"- qa_failed: {qa.qa_failed}",
+        f"- qa_parser_failures: {qa.qa_parser_failures}",
+        f"- qa_provider_failures: {qa.qa_provider_failures}",
+        f"- qa_skipped: {qa.qa_skipped}",
+        f"- qa_prompt_version: {qa.qa_prompt_version}",
+    ]
+
+
+def _qa_issue_entries(qa: QAStats) -> list[str]:
+    if qa.issues:
+        return [f"- {issue.cue_id} | {issue.severity} | {issue.reason}" for issue in qa.issues]
+    return ["- none"]
+
+
+def _batch_summary_entries(batch_entries: Sequence[MinimalBatchReportEntry]) -> list[str]:
+    fallback_final_routes = sum(1 for entry in batch_entries if entry.final_route_label == "fallback")
+    main_final_routes = sum(1 for entry in batch_entries if entry.final_route_label == "main")
+    cache_hit_batches = sum(1 for entry in batch_entries if entry.cache_hit)
+    batches_with_retries = sum(1 for entry in batch_entries if entry.attempts > 1)
+    return [
+        f"- batch_entries: {len(batch_entries)}",
+        f"- batches_with_fallback_final_route: {fallback_final_routes}",
+        f"- batches_with_main_final_route: {main_final_routes}",
+        f"- cache_hit_batches: {cache_hit_batches}",
+        f"- batches_with_retries: {batches_with_retries}",
+    ]
+
+
+def _batch_detail_entries(batch_entries: Sequence[MinimalBatchReportEntry]) -> list[str]:
+    if not batch_entries:
+        return ["- none"]
+    return [_render_batch_entry(entry) for entry in batch_entries]
+
+
+def _terminal_summary_entries(
+    stats: TranslationStats,
+    batch_entries: Sequence[MinimalBatchReportEntry],
+) -> list[str]:
+    final_status = "success" if stats.failed_batches == 0 else "completed_with_failures"
+    terminal_batch_ids = [str(entry.batch_id) for entry in batch_entries if entry.state.value != "success"]
+    return [
+        f"- final_status: {final_status}",
+        f"- failed_batches: {stats.failed_batches}",
+        f"- terminal_batch_ids: {','.join(terminal_batch_ids) if terminal_batch_ids else 'none'}",
+    ]
+
+
+def _warning_entries(
+    stats: TranslationStats,
+    qa: QAStats,
+    batch_entries: Sequence[MinimalBatchReportEntry],
+) -> list[str]:
+    warnings: list[str] = []
+    if qa.qa_failed > 0:
+        warnings.append("- QA failures occurred but translation-stage output was preserved.")
+    if stats.fallback_provider_calls > 0 or any(entry.final_route_label == "fallback" for entry in batch_entries):
+        warnings.append("- Fallback route used for one or more batches.")
+    if any(entry.child_batch_ids or entry.split_reason is not None for entry in batch_entries):
+        warnings.append("- Shrink-batch compensation activated for one or more parent batches.")
+    if stats.failed_batches > 0:
+        warnings.append("- One or more batches terminated with failure metadata in report.")
+    return warnings or ["- none"]
+
+
+def _output_artifact_entries(result: PipelineResult, glossary: Glossary) -> list[str]:
+    return [
+        f"- output_dir: {result.output_paths.output_dir}",
+        f"- translated_srt: {result.output_paths.translated_srt}",
+        f"- bilingual_srt: {result.output_paths.bilingual_srt}",
+        f"- translation_report: {result.output_paths.translation_report}",
+        f"- global_context: {result.output_paths.global_context}",
+        f"- glossary_truncated: {glossary.truncated}",
+    ]
 
 
 def _render_batch_entry(entry: MinimalBatchReportEntry) -> str:
