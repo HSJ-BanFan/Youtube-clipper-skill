@@ -1073,6 +1073,251 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertEqual(captured_max_workers, [2])
         self.assertEqual(len(results), 2)
 
+    def test_adaptive_concurrency_disabled_keeps_fixed_concurrency_level(self):
+        class TrackingProvider:
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                with TrackingProvider.lock:
+                    TrackingProvider.active += 1
+                    TrackingProvider.max_active = max(TrackingProvider.max_active, TrackingProvider.active)
+                try:
+                    time.sleep(0.05)
+                    current_cues = prompt.split("Current cues to translate:", 1)[1].split("After context:", 1)[0]
+                    cue_id = "1" if '"id": "1"' in current_cues else "2" if '"id": "2"' in current_cues else "3" if '"id": "3"' in current_cues else "4"
+                    return json.dumps([{"id": cue_id, "translation": f"ok-{cue_id}"}])
+                finally:
+                    with TrackingProvider.lock:
+                        TrackingProvider.active -= 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_four_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                context_before=0,
+                context_after=0,
+                cache_enabled=False,
+                qa_mode="none",
+                concurrency=3,
+                adaptive_concurrency_enabled=False,
+                adaptive_concurrency_min=1,
+                adaptive_concurrency_max=1,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", TrackingProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(TrackingProvider.max_active, 3)
+        self.assertIn("adaptive_concurrency_enabled: False", report)
+
+    def test_adaptive_concurrency_caps_executor_workers_to_effective_max(self):
+        batch_one = TranslationBatch(cues=(ONE_CUE[0],), context_before=(), context_after=(), batch_id=1)
+        batch_two = TranslationBatch(
+            cues=(Cue(id="2", index=2, start="00:00:01,000", end="00:00:02,000", source="world"),),
+            context_before=(),
+            context_after=(),
+            batch_id=2,
+        )
+        batch_three = TranslationBatch(
+            cues=(Cue(id="3", index=3, start="00:00:02,000", end="00:00:03,000", source="again"),),
+            context_before=(),
+            context_after=(),
+            batch_id=3,
+        )
+        captured_max_workers: list[int] = []
+
+        class CapturingExecutor:
+            def __init__(self, *, max_workers):
+                captured_max_workers.append(max_workers)
+
+            def submit(self, fn, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except Exception as error:
+                    future.set_exception(error)
+                return future
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                return None
+
+        def fake_result(batch, *_args):
+            return BatchExecutionResult(
+                translations=((batch.cues[0].id, "ok"),),
+                stats_delta=BatchStatsDelta(),
+                batch_entry=MinimalBatchReportEntry(
+                    batch_id=batch.batch_id,
+                    state=BatchState.SUCCESS,
+                    cue_count=1,
+                    attempts=1,
+                    cache_hit=False,
+                    cue_range=(batch.cues[0].index, batch.cues[0].index),
+                    attempt=1,
+                    error_type=None,
+                    duration_ms=1,
+                ),
+            )
+
+        config = TranslationConfig(
+            api_key="test-secret",
+            cache_enabled=False,
+            qa_mode="none",
+            concurrency=8,
+            adaptive_concurrency_enabled=True,
+            adaptive_concurrency_min=1,
+            adaptive_concurrency_max=2,
+        )
+
+        with patch("translation.pipeline.ThreadPoolExecutor", CapturingExecutor), patch(
+            "translation.pipeline._execute_translation_batch",
+            side_effect=fake_result,
+        ):
+            results = _run_translation_batches((batch_one, batch_two, batch_three), config, "", "", "", "")
+
+        self.assertEqual(captured_max_workers, [2])
+        self.assertEqual(len(results), 3)
+
+    def test_adaptive_concurrency_reduces_on_provider_pressure_signals(self):
+        batches = tuple(
+            TranslationBatch(
+                cues=(Cue(id=str(index), index=index, start="00:00:00,000", end="00:00:01,000", source=f"cue-{index}"),),
+                context_before=(),
+                context_after=(),
+                batch_id=index,
+            )
+            for index in range(1, 5)
+        )
+        late_phase_active = 0
+        late_phase_max_active = 0
+        lock = threading.Lock()
+
+        def fake_result(batch, *_args):
+            nonlocal late_phase_active, late_phase_max_active
+            if batch.batch_id >= 3:
+                with lock:
+                    late_phase_active += 1
+                    late_phase_max_active = max(late_phase_max_active, late_phase_active)
+            try:
+                time.sleep(0.05)
+                error_type = ErrorType.PROVIDER_TIMEOUT if batch.batch_id <= 2 else None
+                return BatchExecutionResult(
+                    translations=((batch.cues[0].id, f"ok-{batch.batch_id}"),),
+                    stats_delta=BatchStatsDelta(),
+                    batch_entry=MinimalBatchReportEntry(
+                        batch_id=batch.batch_id,
+                        state=BatchState.SUCCESS,
+                        cue_count=1,
+                        attempts=1,
+                        cache_hit=False,
+                        cue_range=(batch.cues[0].index, batch.cues[0].index),
+                        attempt=1,
+                        error_type=error_type,
+                        duration_ms=1,
+                        final_route_label="fallback" if error_type else "main",
+                    ),
+                )
+            finally:
+                if batch.batch_id >= 3:
+                    with lock:
+                        late_phase_active -= 1
+
+        config = TranslationConfig(
+            api_key="test-secret",
+            cache_enabled=False,
+            qa_mode="none",
+            concurrency=2,
+            adaptive_concurrency_enabled=True,
+            adaptive_concurrency_min=1,
+            adaptive_concurrency_max=2,
+        )
+
+        with patch("translation.pipeline._execute_translation_batch", side_effect=fake_result):
+            results = _run_translation_batches(batches, config, "", "", "", "")
+
+        self.assertEqual(len(results), 4)
+        self.assertEqual(late_phase_max_active, 1)
+
+    def test_adaptive_concurrency_recovers_gradually_and_respects_maximum(self):
+        batches = tuple(
+            TranslationBatch(
+                cues=(Cue(id=str(index), index=index, start="00:00:00,000", end="00:00:01,000", source=f"cue-{index}"),),
+                context_before=(),
+                context_after=(),
+                batch_id=index,
+            )
+            for index in range(1, 9)
+        )
+        mid_phase_active = 0
+        mid_phase_max_active = 0
+        late_phase_active = 0
+        late_phase_max_active = 0
+        lock = threading.Lock()
+
+        def fake_result(batch, *_args):
+            nonlocal mid_phase_active, mid_phase_max_active, late_phase_active, late_phase_max_active
+            if 3 <= batch.batch_id <= 4:
+                with lock:
+                    mid_phase_active += 1
+                    mid_phase_max_active = max(mid_phase_max_active, mid_phase_active)
+            if batch.batch_id >= 7:
+                with lock:
+                    late_phase_active += 1
+                    late_phase_max_active = max(late_phase_max_active, late_phase_active)
+            try:
+                time.sleep(0.05)
+                error_type = ErrorType.PROVIDER_TIMEOUT if batch.batch_id <= 2 else None
+                return BatchExecutionResult(
+                    translations=((batch.cues[0].id, f"ok-{batch.batch_id}"),),
+                    stats_delta=BatchStatsDelta(),
+                    batch_entry=MinimalBatchReportEntry(
+                        batch_id=batch.batch_id,
+                        state=BatchState.SUCCESS,
+                        cue_count=1,
+                        attempts=1,
+                        cache_hit=False,
+                        cue_range=(batch.cues[0].index, batch.cues[0].index),
+                        attempt=1,
+                        error_type=error_type,
+                        duration_ms=1,
+                        final_route_label="fallback" if error_type else "main",
+                    ),
+                )
+            finally:
+                if 3 <= batch.batch_id <= 4:
+                    with lock:
+                        mid_phase_active -= 1
+                if batch.batch_id >= 7:
+                    with lock:
+                        late_phase_active -= 1
+
+        config = TranslationConfig(
+            api_key="test-secret",
+            cache_enabled=False,
+            qa_mode="none",
+            concurrency=2,
+            adaptive_concurrency_enabled=True,
+            adaptive_concurrency_min=1,
+            adaptive_concurrency_max=2,
+        )
+
+        with patch("translation.pipeline._execute_translation_batch", side_effect=fake_result):
+            results = _run_translation_batches(batches, config, "", "", "", "")
+
+        self.assertEqual(len(results), 8)
+        self.assertEqual(mid_phase_max_active, 1)
+        self.assertEqual(late_phase_max_active, 2)
+
     def test_structured_cache_hit_batch_report_marks_cache_hit_true_and_attempt_zero(self):
         class SeedProvider:
             def __init__(self, config):

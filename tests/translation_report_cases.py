@@ -53,6 +53,9 @@ class TranslationReportTests(unittest.TestCase):
                 batch_max_cues=24,
                 output_schema_version="v1",
                 batching_strategy_version="v1",
+                adaptive_concurrency_enabled=True,
+                adaptive_concurrency_min=2,
+                adaptive_concurrency_max=4,
             )
             stats = TranslationStats(
                 total_batches=5,
@@ -62,6 +65,12 @@ class TranslationReportTests(unittest.TestCase):
                 cache_misses=4,
                 retries=2,
                 failed_batches=0,
+                adaptive_concurrency_initial=4,
+                adaptive_concurrency_low_watermark=2,
+                adaptive_concurrency_high_watermark=4,
+                adaptive_concurrency_increase_events=1,
+                adaptive_concurrency_decrease_events=2,
+                adaptive_concurrency_pressure_events=2,
             )
             glossary = Glossary(
                 path=root / "glossary.md",

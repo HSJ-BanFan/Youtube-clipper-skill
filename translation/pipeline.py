@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock
@@ -77,6 +77,51 @@ class ChildBatchIdAllocator:
             return left_child_id, right_child_id
 
 
+class AdaptiveConcurrencyController:
+    def __init__(self, config: TranslationConfig) -> None:
+        self.enabled = config.adaptive_concurrency_enabled
+        self.max_concurrency = config.effective_adaptive_concurrency_max
+        self.min_concurrency = min(config.adaptive_concurrency_min, self.max_concurrency)
+        self._current_concurrency = self.max_concurrency
+        self._success_streak = 0
+        self.initial_concurrency = self._current_concurrency if self.enabled else None
+        self.low_watermark = self._current_concurrency if self.enabled else None
+        self.high_watermark = self._current_concurrency if self.enabled else None
+        self.increase_events = 0
+        self.decrease_events = 0
+        self.pressure_events = 0
+
+    def target_concurrency(self) -> int:
+        return self._current_concurrency
+
+    def observe_result(self, result: BatchExecutionResult) -> None:
+        if not self.enabled:
+            return
+        error_type = result.batch_entry.error_type
+        if error_type in PROVIDER_FALLBACK_ERROR_TYPES:
+            self._record_pressure()
+            return
+        self._record_success()
+
+    def _record_pressure(self) -> None:
+        self.pressure_events += 1
+        self._success_streak = 0
+        next_concurrency = max(self.min_concurrency, self._current_concurrency - 1)
+        if next_concurrency != self._current_concurrency:
+            self._current_concurrency = next_concurrency
+            self.decrease_events += 1
+            self.low_watermark = self._current_concurrency if self.low_watermark is None else min(self.low_watermark, self._current_concurrency)
+
+    def _record_success(self) -> None:
+        self._success_streak += 1
+        if self._current_concurrency >= self.max_concurrency or self._success_streak < 2:
+            return
+        self._success_streak = 0
+        self._current_concurrency += 1
+        self.increase_events += 1
+        self.high_watermark = self._current_concurrency if self.high_watermark is None else max(self.high_watermark, self._current_concurrency)
+
+
 _CACHE_ACCESS_LOCK = Lock()
 _INVALID_JSON_MESSAGE = "translation response is not valid JSON"
 SHRINK_BATCH_MAX_SPLIT_ATTEMPTS = 2
@@ -125,7 +170,15 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     stats = TranslationStats(total_batches=len(batches))
     all_translations: dict[str, str] = {}
 
-    batch_results = _run_translation_batches(batches, config, glossary.text, glossary.hash, global_context.text, global_context.hash)
+    batch_results = _run_translation_batches(
+        batches,
+        config,
+        glossary.text,
+        glossary.hash,
+        global_context.text,
+        global_context.hash,
+        stats,
+    )
     for batch_result in batch_results:
         _merge_batch_execution_result(stats, all_translations, batch_result)
 
@@ -157,6 +210,7 @@ def _run_translation_batches(
     glossary_hash: str,
     global_context_text: str,
     global_context_hash: str,
+    stats: TranslationStats | None = None,
 ) -> list[BatchExecutionResult]:
     child_batch_id_allocator = _create_child_batch_id_allocator(batches)
     if config.concurrency == 1:
@@ -178,14 +232,68 @@ def _run_translation_batches(
                 _raise_batch_runtime_error(failure.error)
         return ordered_results
 
+    if not config.adaptive_concurrency_enabled:
+        cancellation_event = Event()
+        executor = ThreadPoolExecutor(max_workers=min(config.concurrency, len(batches)))
+        wait_for_shutdown = True
+        try:
+            futures = {
+                executor.submit(
+                    _execute_translation_batch,
+                    batch,
+                    config,
+                    glossary_text,
+                    glossary_hash,
+                    global_context_text,
+                    global_context_hash,
+                    child_batch_id_allocator,
+                    cancellation_event,
+                ): batch_index
+                for batch_index, batch in enumerate(batches)
+            }
+            ordered_results: list[BatchExecutionResult | None] = [None] * len(futures)
+            while futures:
+                done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    batch_index = futures.pop(future)
+                    try:
+                        ordered_results[batch_index] = future.result()
+                    except BatchExecutionFailed as failure:
+                        cancellation_event.set()
+                        wait_for_shutdown = False
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        _raise_batch_runtime_error(failure.error)
+                    except Exception:
+                        cancellation_event.set()
+                        wait_for_shutdown = False
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        raise
+            if any(result is None for result in ordered_results):
+                raise RuntimeError("batch result was None -- this should not happen")
+            return [result for result in ordered_results if result is not None]
+        finally:
+            executor.shutdown(wait=wait_for_shutdown, cancel_futures=not wait_for_shutdown)
+
     cancellation_event = Event()
-    executor = ThreadPoolExecutor(max_workers=min(config.concurrency, len(batches)))
+    controller = AdaptiveConcurrencyController(config)
+    if stats is not None:
+        stats.adaptive_concurrency_initial = controller.initial_concurrency
+        stats.adaptive_concurrency_low_watermark = controller.low_watermark
+        stats.adaptive_concurrency_high_watermark = controller.high_watermark
+    executor = ThreadPoolExecutor(max_workers=min(controller.max_concurrency, len(batches)))
     wait_for_shutdown = True
-    try:
-        futures = {
-            executor.submit(
+    futures: dict[Any, int] = {}
+    ordered_results: list[BatchExecutionResult | None] = [None] * len(batches)
+    next_batch_index = 0
+
+    def submit_until_target() -> None:
+        nonlocal next_batch_index
+        while next_batch_index < len(batches) and len(futures) < controller.target_concurrency():
+            future = executor.submit(
                 _execute_translation_batch,
-                batch,
+                batches[next_batch_index],
                 config,
                 glossary_text,
                 glossary_hash,
@@ -193,28 +301,39 @@ def _run_translation_batches(
                 global_context_hash,
                 child_batch_id_allocator,
                 cancellation_event,
-            ): batch_index
-            for batch_index, batch in enumerate(batches)
-        }
-        ordered_results: list[BatchExecutionResult | None] = [None] * len(futures)
-        for future in as_completed(futures):
-            batch_index = futures[future]
-            try:
-                ordered_results[batch_index] = future.result()
-            except BatchExecutionFailed as failure:
-                cancellation_event.set()
-                wait_for_shutdown = False
-                for pending_future in futures:
-                    if pending_future is not future:
+            )
+            futures[future] = next_batch_index
+            next_batch_index += 1
+
+    try:
+        submit_until_target()
+        while futures:
+            done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                batch_index = futures.pop(future)
+                try:
+                    result = future.result()
+                except BatchExecutionFailed as failure:
+                    cancellation_event.set()
+                    wait_for_shutdown = False
+                    for pending_future in futures:
                         pending_future.cancel()
-                _raise_batch_runtime_error(failure.error)
-            except Exception:
-                cancellation_event.set()
-                wait_for_shutdown = False
-                for pending_future in futures:
-                    if pending_future is not future:
+                    _raise_batch_runtime_error(failure.error)
+                except Exception:
+                    cancellation_event.set()
+                    wait_for_shutdown = False
+                    for pending_future in futures:
                         pending_future.cancel()
-                raise
+                    raise
+                ordered_results[batch_index] = result
+                controller.observe_result(result)
+                if stats is not None:
+                    stats.adaptive_concurrency_low_watermark = controller.low_watermark
+                    stats.adaptive_concurrency_high_watermark = controller.high_watermark
+                    stats.adaptive_concurrency_increase_events = controller.increase_events
+                    stats.adaptive_concurrency_decrease_events = controller.decrease_events
+                    stats.adaptive_concurrency_pressure_events = controller.pressure_events
+            submit_until_target()
         if any(result is None for result in ordered_results):
             raise RuntimeError("batch result was None -- this should not happen")
         return [result for result in ordered_results if result is not None]
