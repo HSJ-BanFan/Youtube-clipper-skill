@@ -94,6 +94,125 @@ class SuspiciousTranslationRuleTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
 
+    def test_numeric_mismatch_is_marked(self):
+        cues = [cue("1", "Retry 3 times after 15 seconds.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "在 5 秒后重试一次。"}, "zh-CN")
+
+        self.assertIn("numeric token mismatch", reasons_for(candidates, "1"))
+
+    def test_unit_mismatch_is_marked(self):
+        cues = [cue("1", "Set timeout to 500 ms before retry.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "将超时设置为 500 秒后重试。"}, "zh-CN")
+
+        self.assertIn("unit token mismatch", reasons_for(candidates, "1"))
+
+    def test_windows_path_mismatch_is_marked(self):
+        cues = [cue("1", r"Open C:\clips\input.srt before running tool.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "运行工具前打开输入文件。"}, "zh-CN")
+
+        self.assertIn("path token mismatch", reasons_for(candidates, "1"))
+
+    def test_posix_path_mismatch_is_marked(self):
+        cues = [cue("1", "Copy /var/tmp/output.srt into /srv/archive/output.srt now.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "现在复制输出文件。"}, "zh-CN")
+
+        self.assertIn("path token mismatch", reasons_for(candidates, "1"))
+
+    def test_cli_flag_mismatch_is_marked(self):
+        cues = [cue("1", "Run script with --dry-run and --output result.srt.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "运行脚本并输出结果。"}, "zh-CN")
+
+        self.assertIn("option token mismatch", reasons_for(candidates, "1"))
+
+    def test_env_var_mismatch_is_marked(self):
+        cues = [cue("1", "Set TRANSLATION_API_KEY before running command.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "运行命令前先设置密钥。"}, "zh-CN")
+
+        self.assertIn("env var mismatch", reasons_for(candidates, "1"))
+
+    def test_polluted_output_prefix_is_marked(self):
+        cues = [cue("1", "Ship release now.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "Translation: 立即发布版本。"}, "zh-CN")
+
+        self.assertIn("polluted output", reasons_for(candidates, "1"))
+
+    def test_short_technical_cue_can_still_be_marked_unusually_short(self):
+        cues = [cue("1", "Stream copy keeps codec unchanged in FFmpeg.")]
+
+        candidates = find_suspicious_translations(cues, {"1": "保持。"}, "zh-CN")
+
+        self.assertIn("translation unusually short", reasons_for(candidates, "1"))
+
+    def test_reordered_preserved_tokens_do_not_trigger_suspicious(self):
+        cues = [
+            cue(
+                "1",
+                "Open https://a.test https://b.test run python tool.py --dry-run --output /srv/out.srt after 5 s set TRANSLATION_API_KEY check C:\\clips\\input.srt with ffmpeg()",
+            )
+        ]
+
+        candidates = find_suspicious_translations(
+            cues,
+            {
+                "1": "先设置 TRANSLATION_API_KEY 再打开 https://b.test 和 https://a.test 然后用 ffmpeg() 检查 C:\\clips\\input.srt 并在 5 s 后运行 python tool.py --output /srv/out.srt --dry-run",
+            },
+            "zh-CN",
+        )
+
+        self.assertEqual(candidates, [])
+
+    def test_missing_preserved_tokens_still_trigger_suspicious(self):
+        cues = [
+            cue(
+                "1",
+                "Open https://a.test then https://b.test, run python tool.py --dry-run --output /srv/out.srt after 5 s, set TRANSLATION_API_KEY, and check C:\\clips\\input.srt with ffmpeg().",
+            )
+        ]
+
+        candidates = find_suspicious_translations(
+            cues,
+            {
+                "1": "打开 https://a.test，然后在 5 s 后运行 python tool.py --output /srv/out.srt。",
+            },
+            "zh-CN",
+        )
+
+        self.assertIn("url count mismatch", reasons_for(candidates, "1"))
+        self.assertIn("path token mismatch", reasons_for(candidates, "1"))
+        self.assertIn("option token mismatch", reasons_for(candidates, "1"))
+        self.assertIn("env var mismatch", reasons_for(candidates, "1"))
+        self.assertIn("code token loss", reasons_for(candidates, "1"))
+
+    def test_duplicated_or_mismatched_token_counts_still_trigger_suspicious(self):
+        cues = [
+            cue(
+                "1",
+                "Open https://a.test, run python tool.py --dry-run after 5 s, set TRANSLATION_API_KEY, and inspect C:\\clips\\input.srt.",
+            )
+        ]
+
+        candidates = find_suspicious_translations(
+            cues,
+            {
+                "1": "打开 https://a.test 和 https://a.test，在 6 s 后运行 python tool.py --dry-run --dry-run，并设置 TRANSLATION_API_KEY TRANSLATION_API_KEY，再检查 C:\\clips\\other.srt。",
+            },
+            "zh-CN",
+        )
+
+        self.assertIn("url count mismatch", reasons_for(candidates, "1"))
+        self.assertIn("numeric token mismatch", reasons_for(candidates, "1"))
+        self.assertIn("path token mismatch", reasons_for(candidates, "1"))
+        self.assertIn("option token mismatch", reasons_for(candidates, "1"))
+        self.assertIn("env var mismatch", reasons_for(candidates, "1"))
+        self.assertIn("code token loss", reasons_for(candidates, "1"))
+
 
 if __name__ == "__main__":
     unittest.main()

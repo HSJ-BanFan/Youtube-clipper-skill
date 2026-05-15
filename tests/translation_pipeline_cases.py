@@ -299,12 +299,35 @@ class QAResponseParserTests(unittest.TestCase):
             '[{"id":"2","action":"fix","translation":"你好","reason":"empty"}]',
             '[{"id":"1","action":"rewrite","translation":"你好","reason":"empty"}]',
             '[{"id":"1","action":"fix","translation":"  ","reason":"empty"}]',
+            '[{"id":"1","action":"fix","translation":"你好","reason":"  "}]',
+            '[{"id":"1","action":"fix","translation":"你好"}]',
         ]
 
         for response in bad_responses:
             with self.subTest(response=response):
                 with self.assertRaisesRegex(RuntimeError, "QA response"):
                     parse_qa_response(response, candidates)
+
+    def test_parse_qa_response_rejects_duplicate_ids_wrong_item_count_and_reordered_ids(self):
+        candidates = [
+            Cue(id="1", index=1, start="00:00:00,000", end="00:00:01,000", source="hello"),
+            Cue(id="2", index=2, start="00:00:01,000", end="00:00:02,000", source="world"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate id"):
+            parse_qa_response(
+                '[{"id":"1","action":"fix","translation":"你好","reason":"fix"},{"id":"1","action":"keep","translation":"world","reason":"keep"}]',
+                candidates,
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "item count"):
+            parse_qa_response('[{"id":"1","action":"fix","translation":"你好","reason":"fix"}]', candidates)
+
+        with self.assertRaisesRegex(RuntimeError, "order"):
+            parse_qa_response(
+                '[{"id":"2","action":"keep","translation":"world","reason":"keep"},{"id":"1","action":"fix","translation":"你好","reason":"fix"}]',
+                candidates,
+            )
 
 
 class TranslationProviderErrorTests(unittest.TestCase):
@@ -2470,7 +2493,7 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
         self.assertIn("qa_kept: 1", report)
         self.assertNotIn("test-secret", report)
 
-    def test_malformed_qa_json_raises_clear_runtime_error_and_writes_no_outputs(self):
+    def test_malformed_qa_json_keeps_translation_stage_outputs_and_records_failure(self):
         class FakeProvider:
             def __init__(self, config):
                 self.config = config
@@ -2493,12 +2516,123 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
             )
 
             with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
-                with self.assertRaisesRegex(RuntimeError, "QA response is not valid JSON"):
-                    run_translation_pipeline(subtitle_path, config)
+                run_translation_pipeline(subtitle_path, config)
 
-            self.assertFalse((output_dir / "translated.zh-CN.srt").exists())
-            self.assertFalse((output_dir / "bilingual.srt").exists())
-            self.assertFalse((output_dir / "translation_report.md").exists())
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertIn("As an AI, I cannot help.", translated)
+        self.assertIn("As an AI, I cannot help.\nhello", bilingual)
+        self.assertIn("qa_kept: 0", report)
+        self.assertIn("qa_skipped: 1", report)
+        self.assertIn("qa_parser_failures: 1", report)
+        self.assertIn("qa_provider_failures: 0", report)
+
+    def test_qa_provider_failure_keeps_translation_stage_outputs_and_records_failure(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "As an AI, I cannot help."}])
+
+            def review_suspicious(self, prompt):
+                raise RuntimeError("qa provider down")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=1,
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertIn("As an AI, I cannot help.", translated)
+        self.assertIn("As an AI, I cannot help.\nhello", bilingual)
+        self.assertIn("qa_kept: 0", report)
+        self.assertIn("qa_skipped: 1", report)
+        self.assertIn("qa_parser_failures: 0", report)
+        self.assertIn("qa_provider_failures: 1", report)
+
+    def test_qa_fix_remains_post_processing_and_does_not_overwrite_batch_cache(self):
+        class SeedProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "1", "translation": "As an AI, I cannot help."}])
+
+            def review_suspicious(self, prompt):
+                return json.dumps(
+                    [
+                        {"id": "1", "action": "fix", "translation": "你好", "reason": "fixed refusal"},
+                    ]
+                )
+
+        class CachedTranslationProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                raise AssertionError("translation-stage cache hit should skip provider")
+
+            def review_suspicious(self, prompt):
+                return json.dumps(
+                    [
+                        {"id": "1", "action": "fix", "translation": "再次修复", "reason": "fixed refusal"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_one_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            seed_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "seed"),
+                batch_size=1,
+                cache_path=str(cache_path),
+            )
+            rerun_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(root / "rerun"),
+                batch_size=1,
+                cache_path=str(cache_path),
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", SeedProvider):
+                run_translation_pipeline(subtitle_path, seed_config)
+
+            cache_rows_after_seed = _read_cache_rows(cache_path)
+            seed_translated = (root / "seed" / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            seed_report = (root / "seed" / "translation_report.md").read_text(encoding="utf-8")
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", CachedTranslationProvider):
+                run_translation_pipeline(subtitle_path, rerun_config)
+
+            cache_rows_after_rerun = _read_cache_rows(cache_path)
+            rerun_translated = (root / "rerun" / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            rerun_report = (root / "rerun" / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(json.loads(cache_rows_after_seed[0]), [{"id": "1", "translation": "As an AI, I cannot help."}])
+        self.assertEqual(cache_rows_after_rerun, cache_rows_after_seed)
+        self.assertIn("你好", seed_translated)
+        self.assertIn("再次修复", rerun_translated)
+        self.assertIn("cache_misses: 1", seed_report)
+        self.assertIn("cache_hits: 1", rerun_report)
+        self.assertIn("provider_calls: 0", rerun_report)
+        self.assertIn("qa_fixed: 1", rerun_report)
 
     def test_qa_none_skips_review_suspicious(self):
         self._assert_qa_disabled_skips_review_suspicious("none")

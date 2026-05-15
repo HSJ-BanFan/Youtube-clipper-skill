@@ -153,11 +153,15 @@ class TranslationReportTests(unittest.TestCase):
                 qa=QAStats(
                     qa_mode="suspicious-only",
                     qa_candidates=2,
+                    qa_reviewed=2,
                     qa_provider_calls=1,
                     qa_fixed=1,
                     qa_kept=1,
                     qa_failed=0,
-                    qa_prompt_version="translation-v2-suspicious-qa-v1",
+                    qa_parser_failures=0,
+                    qa_provider_failures=0,
+                    qa_skipped=0,
+                    qa_prompt_version="translation-v2-suspicious-qa-v2",
                     issues=(
                         QAIssue(cue_id="1", severity="high", reason="empty translation"),
                         QAIssue(cue_id="2", severity="medium", reason="url count mismatch"),
@@ -175,11 +179,15 @@ class TranslationReportTests(unittest.TestCase):
         self.assertIn("## QA", report)
         self.assertIn("- qa_mode: suspicious-only", report)
         self.assertIn("- qa_candidates: 2", report)
+        self.assertIn("- qa_reviewed: 2", report)
         self.assertIn("- qa_provider_calls: 1", report)
         self.assertIn("- qa_fixed: 1", report)
         self.assertIn("- qa_kept: 1", report)
         self.assertIn("- qa_failed: 0", report)
-        self.assertIn("- qa_prompt_version: translation-v2-suspicious-qa-v1", report)
+        self.assertIn("- qa_parser_failures: 0", report)
+        self.assertIn("- qa_provider_failures: 0", report)
+        self.assertIn("- qa_skipped: 0", report)
+        self.assertIn("- qa_prompt_version: translation-v2-suspicious-qa-v2", report)
         self.assertIn("## QA Issues", report)
         self.assertIn("- 1 | high | empty translation", report)
         self.assertIn("- 2 | medium | url count mismatch", report)
