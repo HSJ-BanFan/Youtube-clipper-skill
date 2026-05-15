@@ -8,7 +8,7 @@ from translation.qa import QACandidate
 
 
 PROMPT_VERSION = "translation-v2-json-cue-v1"
-QA_PROMPT_VERSION = "translation-v2-suspicious-qa-v1"
+QA_PROMPT_VERSION = "translation-v2-suspicious-qa-v2"
 
 
 def build_translation_prompt(
@@ -97,8 +97,9 @@ def build_suspicious_qa_prompt(
             "Return a JSON array with exactly one item for each candidate.",
             "do not add, delete, or reorder ids. id must match exactly.",
             'Each item shape: {"id": "...", "action": "keep" | "fix", "translation": "...", "reason": "..."}.',
-            "translation must not be empty.",
-            "preserve code, commands, variable names, paths, URLs, and library names.",
+            "translation required for both keep and fix. translation must not be empty.",
+            "reason required and brief.",
+            "preserve numbers, units, URLs, paths, commands, code, variable names, and library names.",
             "Follow the glossary consistently when fixing translations.",
             "Global context is only for understanding; do not translate global context; do not output global context.",
             "Glossary:",

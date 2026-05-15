@@ -130,7 +130,7 @@ class TranslationPromptTests(unittest.TestCase):
 
 class SuspiciousQAPromptTests(unittest.TestCase):
     def test_qa_prompt_version_is_stable_for_reports(self):
-        self.assertEqual(QA_PROMPT_VERSION, "translation-v2-suspicious-qa-v1")
+        self.assertEqual(QA_PROMPT_VERSION, "translation-v2-suspicious-qa-v2")
 
     def test_qa_prompt_contains_candidate_id_source_translation_and_issues(self):
         candidate = QACandidate(
@@ -146,6 +146,7 @@ class SuspiciousQAPromptTests(unittest.TestCase):
         self.assertIn('"translation": "打开文档"', prompt)
         self.assertIn('"severity": "medium"', prompt)
         self.assertIn('"reason": "url count mismatch"', prompt)
+        self.assertIn("Review only suspicious subtitle translations", prompt)
 
     def test_qa_prompt_requires_json_only_and_keep_or_fix_actions(self):
         candidate = QACandidate(
@@ -161,6 +162,28 @@ class SuspiciousQAPromptTests(unittest.TestCase):
         self.assertIn('"action": "keep" | "fix"', prompt)
         self.assertIn("Only fix obvious errors", prompt)
         self.assertIn("do not add, delete, or reorder ids", prompt)
+        self.assertIn("id must match exactly", prompt)
+        self.assertIn("translation required for both keep and fix", prompt)
+        self.assertIn("reason required and brief", prompt)
+
+    def test_qa_prompt_requires_preserving_technical_tokens(self):
+        candidate = QACandidate(
+            cue=cue("3", "Set TRANSLATION_API_KEY and run ffmpeg -i input.mp4 --dry-run at C:\\clips\\demo.srt"),
+            translation="设置密钥并运行命令",
+            issues=(QAIssue(cue_id="3", severity="medium", reason="env var mismatch"),),
+        )
+
+        prompt = build_suspicious_qa_prompt([candidate], "zh-CN")
+
+        self.assertIn("preserve numbers", prompt)
+        self.assertIn("units", prompt)
+        self.assertIn("URLs", prompt)
+        self.assertIn("paths", prompt)
+        self.assertIn("commands", prompt)
+        self.assertIn("code", prompt)
+        self.assertIn("variable names", prompt)
+        self.assertIn("library names", prompt)
+        self.assertNotIn("translate all subtitles", prompt.lower())
 
     def test_qa_prompt_includes_glossary_and_global_context_without_outputting_context(self):
         candidate = QACandidate(

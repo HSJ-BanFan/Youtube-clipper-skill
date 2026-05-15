@@ -15,10 +15,14 @@ from translation.qa import QAIssue
 class QAStats:
     qa_mode: str = "none"
     qa_candidates: int = 0
+    qa_reviewed: int = 0
     qa_provider_calls: int = 0
     qa_fixed: int = 0
     qa_kept: int = 0
     qa_failed: int = 0
+    qa_parser_failures: int = 0
+    qa_provider_failures: int = 0
+    qa_skipped: int = 0
     qa_prompt_version: str = ""
     issues: tuple[QAIssue, ...] = ()
 
@@ -106,10 +110,14 @@ def _render_report(entries: dict[str, Any], qa: QAStats, batch_entries: Sequence
             "## QA",
             f"- qa_mode: {qa.qa_mode}",
             f"- qa_candidates: {qa.qa_candidates}",
+            f"- qa_reviewed: {qa.qa_reviewed}",
             f"- qa_provider_calls: {qa.qa_provider_calls}",
             f"- qa_fixed: {qa.qa_fixed}",
             f"- qa_kept: {qa.qa_kept}",
             f"- qa_failed: {qa.qa_failed}",
+            f"- qa_parser_failures: {qa.qa_parser_failures}",
+            f"- qa_provider_failures: {qa.qa_provider_failures}",
+            f"- qa_skipped: {qa.qa_skipped}",
             f"- qa_prompt_version: {qa.qa_prompt_version}",
             "",
             "## QA Issues",

@@ -704,21 +704,26 @@ def parse_qa_response(
 
     fixes: dict[str, str] = {}
     seen_ids: set[str] = set()
-    for item in payload:
+    for expected_id, item in zip(expected_ids, payload, strict=True):
         if not isinstance(item, dict):
             raise RuntimeError("QA response item must be an object")
         cue_id = item.get("id")
         action = item.get("action")
         translation = item.get("translation")
+        reason = item.get("reason")
         if not isinstance(cue_id, str) or cue_id not in expected_ids:
             raise RuntimeError("QA response id does not match candidates")
         if cue_id in seen_ids:
             raise RuntimeError("QA response contains duplicate id")
+        if cue_id != expected_id:
+            raise RuntimeError("QA response id order does not match candidates")
         seen_ids.add(cue_id)
         if action not in {"keep", "fix"}:
             raise RuntimeError("QA response action must be keep or fix")
         if not isinstance(translation, str) or not translation.strip():
             raise RuntimeError("QA response translation must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise RuntimeError("QA response reason must be a non-empty string")
         if action == "fix":
             fixes[cue_id] = translation
 
@@ -772,12 +777,23 @@ def _run_suspicious_qa(
 
     reviewer = provider or OpenAICompatibleProvider(config)
     prompt = build_suspicious_qa_prompt(candidates, config.target_lang, glossary_text, global_context_text)
+    qa_stats.qa_reviewed = len(candidates)
     qa_stats.qa_provider_calls += 1
     try:
-        fixes = parse_qa_response(reviewer.review_suspicious(prompt), candidates)
+        response_text = reviewer.review_suspicious(prompt)
+    except Exception:
+        qa_stats.qa_failed += 1
+        qa_stats.qa_provider_failures += 1
+        qa_stats.qa_skipped = len(candidates)
+        return translations
+
+    try:
+        fixes = parse_qa_response(response_text, candidates)
     except RuntimeError:
         qa_stats.qa_failed += 1
-        raise
+        qa_stats.qa_parser_failures += 1
+        qa_stats.qa_skipped = len(candidates)
+        return translations
     qa_stats.qa_fixed = len(fixes)
     qa_stats.qa_kept = len(candidates) - len(fixes)
     return translations | fixes
