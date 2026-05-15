@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock
 from time import perf_counter
+from typing import Any
 
 from translation.batching import allocate_child_batch_ids, create_batches, split_batch
 from translation.cache import CacheEntry, TranslationCache, build_batch_cache_key

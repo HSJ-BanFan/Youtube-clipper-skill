@@ -184,7 +184,7 @@ def _concurrency_summary_entries(safe_config: dict[str, Any], stats: Translation
         f"- concurrency: {safe_config['concurrency']}",
         f"- adaptive_concurrency_enabled: {safe_config['adaptive_concurrency_enabled']}",
         f"- adaptive_concurrency_min: {safe_config['adaptive_concurrency_min']}",
-        f"- adaptive_concurrency_max: {safe_config['adaptive_concurrency_max']}",
+        f"- adaptive_concurrency_max: {_render_optional_int(safe_config['adaptive_concurrency_max'])}",
         f"- adaptive_concurrency_initial: {_render_optional_int(stats.adaptive_concurrency_initial)}",
         f"- adaptive_concurrency_low_watermark: {_render_optional_int(stats.adaptive_concurrency_low_watermark)}",
         f"- adaptive_concurrency_high_watermark: {_render_optional_int(stats.adaptive_concurrency_high_watermark)}",
