@@ -42,6 +42,9 @@ ENV_MAPPING = {
     "batch_max_chars": "TRANSLATION_BATCH_MAX_CHARS",
     "batch_max_cues": "TRANSLATION_BATCH_MAX_CUES",
     "concurrency": "TRANSLATION_CONCURRENCY",
+    "adaptive_concurrency_enabled": "TRANSLATION_ADAPTIVE_CONCURRENCY_ENABLED",
+    "adaptive_concurrency_min": "TRANSLATION_ADAPTIVE_CONCURRENCY_MIN",
+    "adaptive_concurrency_max": "TRANSLATION_ADAPTIVE_CONCURRENCY_MAX",
     "output_schema_version": "TRANSLATION_OUTPUT_SCHEMA_VERSION",
     "batching_strategy_version": "TRANSLATION_BATCHING_STRATEGY_VERSION",
 }
@@ -75,6 +78,9 @@ class TranslationConfig:
     batch_max_chars: int | None = None
     batch_max_cues: int | None = None
     concurrency: int = 1
+    adaptive_concurrency_enabled: bool = False
+    adaptive_concurrency_min: int = 1
+    adaptive_concurrency_max: int | None = None
     output_schema_version: str = "v1"
     batching_strategy_version: str = "v1"
     output_dir: str | None = None
@@ -122,6 +128,12 @@ class TranslationConfig:
             raise ValueError("batch_max_cues must be greater than 0 when set")
         if self.concurrency <= 0:
             raise ValueError("concurrency must be greater than 0")
+        if not isinstance(self.adaptive_concurrency_enabled, bool):
+            raise ValueError("adaptive_concurrency_enabled must be a boolean")
+        if self.adaptive_concurrency_min <= 0:
+            raise ValueError("adaptive_concurrency_min must be greater than 0")
+        if self.adaptive_concurrency_max is not None and self.adaptive_concurrency_max < self.adaptive_concurrency_min:
+            raise ValueError("adaptive_concurrency_max must be greater than or equal to adaptive_concurrency_min")
         if self.output_schema_version not in VALID_OUTPUT_SCHEMA_VERSIONS:
             valid_output_schema_versions = ", ".join(sorted(VALID_OUTPUT_SCHEMA_VERSIONS))
             raise ValueError(f"output_schema_version must be one of: {valid_output_schema_versions}")
@@ -134,6 +146,11 @@ class TranslationConfig:
     @property
     def effective_review_model(self) -> str:
         return self.review_model or self.model
+
+    @property
+    def effective_adaptive_concurrency_max(self) -> int:
+        configured_max = self.concurrency if self.adaptive_concurrency_max is None else self.adaptive_concurrency_max
+        return min(self.concurrency, configured_max)
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -163,6 +180,9 @@ class TranslationConfig:
             "batch_max_chars": self.batch_max_chars,
             "batch_max_cues": self.batch_max_cues,
             "concurrency": self.concurrency,
+            "adaptive_concurrency_enabled": self.adaptive_concurrency_enabled,
+            "adaptive_concurrency_min": self.adaptive_concurrency_min,
+            "adaptive_concurrency_max": self.adaptive_concurrency_max,
             "output_schema_version": self.output_schema_version,
             "batching_strategy_version": self.batching_strategy_version,
             "output_dir": self.output_dir,
@@ -232,11 +252,13 @@ def _coerce_value(field_name: str, raw_value: str) -> Any:
             "batch_max_chars",
             "batch_max_cues",
             "concurrency",
+            "adaptive_concurrency_min",
+            "adaptive_concurrency_max",
         }:
             return int(raw_value)
         if field_name == "temperature":
             return float(raw_value)
-        if field_name in {"cache_enabled", "structured_output"}:
+        if field_name in {"cache_enabled", "structured_output", "adaptive_concurrency_enabled"}:
             return _parse_bool(raw_value)
     except ValueError as exc:
         env_name = ENV_MAPPING.get(field_name, field_name)

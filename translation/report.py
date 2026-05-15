@@ -38,6 +38,12 @@ class TranslationStats:
     cache_misses: int = 0
     retries: int = 0
     failed_batches: int = 0
+    adaptive_concurrency_initial: int | None = None
+    adaptive_concurrency_low_watermark: int | None = None
+    adaptive_concurrency_high_watermark: int | None = None
+    adaptive_concurrency_increase_events: int = 0
+    adaptive_concurrency_decrease_events: int = 0
+    adaptive_concurrency_pressure_events: int = 0
     batch_entries: list[MinimalBatchReportEntry] = field(default_factory=list)
     qa: QAStats | None = None
 
@@ -75,7 +81,7 @@ def _render_report(
     lines.extend(_render_section("Config Snapshot", _config_snapshot_entries(safe_config, glossary, context)))
     lines.extend(_render_section("Cache Summary", _cache_summary_entries(safe_config, stats)))
     lines.extend(_render_section("Provider / Fallback Summary", _provider_summary_entries(safe_config, stats)))
-    lines.extend(_render_section("Concurrency Summary", _concurrency_summary_entries(safe_config)))
+    lines.extend(_render_section("Concurrency Summary", _concurrency_summary_entries(safe_config, stats)))
     lines.extend(_render_section("Shrink-Batch Summary", _shrink_summary_entries(stats.batch_entries)))
     lines.extend(_render_section("QA Summary", _qa_summary_entries(qa)))
     lines.extend(_render_section("QA", _qa_summary_entries(qa)))
@@ -173,9 +179,18 @@ def _provider_summary_entries(safe_config: dict[str, Any], stats: TranslationSta
     ]
 
 
-def _concurrency_summary_entries(safe_config: dict[str, Any]) -> list[str]:
+def _concurrency_summary_entries(safe_config: dict[str, Any], stats: TranslationStats) -> list[str]:
     return [
         f"- concurrency: {safe_config['concurrency']}",
+        f"- adaptive_concurrency_enabled: {safe_config['adaptive_concurrency_enabled']}",
+        f"- adaptive_concurrency_min: {safe_config['adaptive_concurrency_min']}",
+        f"- adaptive_concurrency_max: {_render_optional_int(safe_config['adaptive_concurrency_max'])}",
+        f"- adaptive_concurrency_initial: {_render_optional_int(stats.adaptive_concurrency_initial)}",
+        f"- adaptive_concurrency_low_watermark: {_render_optional_int(stats.adaptive_concurrency_low_watermark)}",
+        f"- adaptive_concurrency_high_watermark: {_render_optional_int(stats.adaptive_concurrency_high_watermark)}",
+        f"- adaptive_concurrency_increase_events: {stats.adaptive_concurrency_increase_events}",
+        f"- adaptive_concurrency_decrease_events: {stats.adaptive_concurrency_decrease_events}",
+        f"- adaptive_concurrency_pressure_events: {stats.adaptive_concurrency_pressure_events}",
         f"- engine_version: {safe_config['engine_version']}",
         f"- structured_output: {safe_config['structured_output']}",
     ]
@@ -247,6 +262,10 @@ def _terminal_summary_entries(
         f"- failed_batches: {stats.failed_batches}",
         f"- terminal_batch_ids: {','.join(terminal_batch_ids) if terminal_batch_ids else 'none'}",
     ]
+
+
+def _render_optional_int(value: int | None) -> str:
+    return "none" if value is None else str(value)
 
 
 def _warning_entries(

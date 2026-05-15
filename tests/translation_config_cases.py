@@ -146,6 +146,48 @@ class TranslationConfigTests(unittest.TestCase):
                 environ={"TRANSLATION_CONCURRENCY": "0"},
             )
 
+    def test_adaptive_concurrency_defaults_off(self):
+        config = TranslationConfig()
+
+        self.assertFalse(config.adaptive_concurrency_enabled)
+        self.assertEqual(config.adaptive_concurrency_min, 1)
+        self.assertIsNone(config.adaptive_concurrency_max)
+
+    def test_env_adaptive_concurrency_values_load(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={
+                "TRANSLATION_ADAPTIVE_CONCURRENCY_ENABLED": "true",
+                "TRANSLATION_ADAPTIVE_CONCURRENCY_MIN": "2",
+                "TRANSLATION_ADAPTIVE_CONCURRENCY_MAX": "5",
+            },
+        )
+
+        self.assertTrue(config.adaptive_concurrency_enabled)
+        self.assertEqual(config.adaptive_concurrency_min, 2)
+        self.assertEqual(config.adaptive_concurrency_max, 5)
+
+    def test_safe_config_output_includes_adaptive_concurrency_fields(self):
+        config = TranslationConfig(
+            adaptive_concurrency_enabled=True,
+            adaptive_concurrency_min=2,
+            adaptive_concurrency_max=4,
+        )
+
+        safe = config.to_safe_dict()
+
+        self.assertTrue(safe["adaptive_concurrency_enabled"])
+        self.assertEqual(safe["adaptive_concurrency_min"], 2)
+        self.assertEqual(safe["adaptive_concurrency_max"], 4)
+
+    def test_adaptive_concurrency_rejects_invalid_bounds(self):
+        with self.assertRaisesRegex(ValueError, "adaptive_concurrency_min must be greater than 0"):
+            TranslationConfig(adaptive_concurrency_min=0)
+
+        with self.assertRaisesRegex(ValueError, "adaptive_concurrency_max must be greater than or equal to adaptive_concurrency_min"):
+            TranslationConfig(adaptive_concurrency_min=3, adaptive_concurrency_max=2)
+
     def test_engine_version_rejects_invalid_values(self):
         with self.assertRaisesRegex(ValueError, "engine_version must be one of"):
             TranslationConfig(engine_version="v3")
