@@ -781,7 +781,7 @@ def _run_suspicious_qa(
     qa_stats.qa_provider_calls += 1
     try:
         response_text = reviewer.review_suspicious(prompt)
-    except Exception:
+    except RuntimeError:
         qa_stats.qa_failed += 1
         qa_stats.qa_provider_failures += 1
         qa_stats.qa_skipped = len(candidates)
