@@ -193,6 +193,8 @@ def _parse_blocks(content: str, is_vtt: bool) -> list[Cue]:
         if cue is None:
             snippet = _format_block_snippet(block)
             raise ValueError(f"invalid subtitle cue block near cue index {len(cues) + 1}: {snippet}")
+        if is_vtt and not cue.source.strip():
+            continue
         cues.append(cue)
     return cues
 
@@ -250,16 +252,17 @@ def _strip_vtt_header_metadata(lines: list[str]) -> list[str]:
 
 
 def _collapse_blank_after_timing(lines: list[str]) -> list[str]:
-    """Drop whitespace-only lines that immediately follow a VTT timing line.
+    """Drop the single placeholder blank line that follows a VTT timing line.
 
-    YouTube auto-sub VTT places a blank/space-only line between the timing line
-    and the cue body to act as a "previous text" placeholder. The block splitter
-    treats this as a block boundary, so we collapse it before splitting.
+    YouTube auto-sub VTT places exactly one blank/space-only line between the
+    timing line and the cue body. We only collapse the first such blank so that
+    any subsequent blank line still acts as a normal cue separator.
     """
     result: list[str] = []
     just_saw_timing = False
     for line in lines:
         if just_saw_timing and line.strip() == "":
+            just_saw_timing = False
             continue
         result.append(line)
         just_saw_timing = bool(_TIMING_RE.match(line.strip()))

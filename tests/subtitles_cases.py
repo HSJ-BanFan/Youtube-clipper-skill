@@ -192,6 +192,21 @@ class SubtitleParserTests(unittest.TestCase):
         self.assertEqual(cues[2].start, "00:00:02,560")
         self.assertIn("<00:00:02.760>", cues[2].source)
 
+    def test_parse_vtt_collapses_only_first_blank_after_timing(self):
+        cues = parse_vtt(
+            "WEBVTT\n\n"
+            "00:00:00.000 --> 00:00:01.000\n"
+            " \n"
+            "first cue body\n"
+            "\n"
+            "00:00:02.000 --> 00:00:03.000\n"
+            "second cue body\n\n"
+        )
+
+        self.assertEqual(len(cues), 2)
+        self.assertEqual(cues[0].source, "first cue body")
+        self.assertEqual(cues[1].source, "second cue body")
+
     def test_parse_vtt_accepts_hourless_timestamps(self):
         cues = parse_vtt("WEBVTT\n\n01:23.456 --> 01:25.000\nhello\n\n")
 

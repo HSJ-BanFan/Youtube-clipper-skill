@@ -440,6 +440,28 @@ class YoutubeAutoSubVttSegmentationTests(unittest.TestCase):
         rolling_warnings = [w for w in result.warnings if w.code == "rolling_overlap_removed"]
         self.assertTrue(rolling_warnings)
 
+    def test_untimed_prefix_preserved_when_inline_timestamp_equals_cue_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "edge.vtt"
+            # Cue where first inline timestamp == cue start_ms.
+            # The untimed prefix "hello" must NOT be silently discarded.
+            subtitle_path.write_text(
+                "WEBVTT\n\n"
+                "00:00:01.000 --> 00:00:03.000\n"
+                "hello<00:00:01.000><c> world</c><00:00:02.000><c> end</c>\n\n",
+                encoding="utf-8",
+            )
+
+            result = segment_subtitles(
+                SubtitleSegmentationSource(mode="single_file", subtitle_path=subtitle_path),
+                SegmentationOptions(),
+            )
+
+        merged = " ".join(unit.source_text for unit in result.units)
+        self.assertIn("hello", merged)
+        self.assertIn("world", merged)
+        self.assertIn("end", merged)
+
 
 if __name__ == "__main__":
     unittest.main()

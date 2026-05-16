@@ -585,7 +585,12 @@ def _parse_vtt_inline_tokens(
                 synthetic = cue.start_ms + (span_ms * i) // first_timed_index
                 token_starts[i] = (text, synthetic)
         else:
-            token_starts = token_starts[first_timed_index:]
+            return None, SegmentationWarning(
+                code="invalid_inline_timing",
+                message="inline timing prefix cannot be synthesized; falling back to cue-proportional timing",
+                severity="info",
+                cue_id=cue.cue_id,
+            )
     if any(start is None for _, start in token_starts):
         return None, SegmentationWarning(
             code="invalid_inline_timing",
