@@ -4,6 +4,7 @@ from translation.models import Cue, TranslationBatch
 from translation.prompts import (
     PROMPT_VERSION,
     QA_PROMPT_VERSION,
+    build_structured_translation_prompt,
     build_suspicious_qa_prompt,
     build_translation_prompt,
 )
@@ -22,7 +23,7 @@ def cue(cue_id, source):
 
 class TranslationPromptTests(unittest.TestCase):
     def test_prompt_version_is_stable_for_cache_and_reports(self):
-        self.assertEqual(PROMPT_VERSION, "translation-v2-json-cue-v1")
+        self.assertEqual(PROMPT_VERSION, "translation-v2-json-cue-v2")
 
     def test_prompt_contains_target_language_and_current_cues(self):
         batch = TranslationBatch(
@@ -126,6 +127,47 @@ class TranslationPromptTests(unittest.TestCase):
 
         self.assertIn("do not translate context", prompt)
         self.assertIn("do not translate global context", prompt)
+
+    def test_structured_prompt_forbids_cross_cue_content_transfer(self):
+        batch = TranslationBatch(
+            batch_id=7,
+            cues=[cue("412", "keeping track of how many times"), cue("413", "user and the computer wins")],
+            context_before=[cue("411", "that is rock paper scissors")],
+            context_after=[cue("414", "going to move on to the next project")],
+        )
+
+        prompt = build_structured_translation_prompt(batch, "zh-CN").lower()
+
+        self.assertIn("do not move source content between cue_ids", prompt)
+        self.assertIn("do not translate adjacent cue content into the current cue", prompt)
+        self.assertIn("each output item must translate only that item's source cue text", prompt)
+
+    def test_structured_prompt_preserves_fragment_cues_as_fragments(self):
+        batch = TranslationBatch(
+            batch_id=8,
+            cues=[cue("412", "keeping track of how many times with the")],
+            context_before=[],
+            context_after=[cue("413", "user and the computer wins")],
+        )
+
+        prompt = build_structured_translation_prompt(batch, "zh-CN").lower()
+
+        self.assertIn("if a source cue is a fragment, preserve it as a fragment", prompt)
+        self.assertIn("do not make the translation more complete by borrowing from neighboring cues", prompt)
+
+    def test_structured_prompt_limits_context_to_disambiguation_only(self):
+        batch = TranslationBatch(
+            batch_id=9,
+            cues=[cue("412", "fragment")],
+            context_before=[cue("411", "previous")],
+            context_after=[cue("413", "next")],
+        )
+
+        prompt = build_structured_translation_prompt(batch, "zh-CN").lower()
+
+        self.assertIn("global context is only for disambiguation", prompt)
+        self.assertIn("before/after context is only for disambiguation", prompt)
+        self.assertIn("not a content source", prompt)
 
 
 class SuspiciousQAPromptTests(unittest.TestCase):
