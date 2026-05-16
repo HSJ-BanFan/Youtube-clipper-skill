@@ -514,6 +514,15 @@ def _tokenize_cue(
     input_format: str,
 ) -> tuple[list[tuple[str, int, int, TimingSource]], list[SegmentationWarning]]:
     warnings: list[SegmentationWarning] = []
+    if cue.end_ms <= cue.start_ms:
+        return [], [
+            SegmentationWarning(
+                code="malformed_cue_skipped",
+                message="cue has zero or negative duration; skipped token generation",
+                severity="warning",
+                cue_id=cue.cue_id,
+            )
+        ]
     if input_format == "vtt":
         inline_tokens, inline_warning = _parse_vtt_inline_tokens(cue)
         if inline_tokens is not None:
@@ -598,7 +607,7 @@ def _build_proportional_tokens(cue: SourceCue) -> list[tuple[str, int, int, Timi
         return []
     duration_ms = cue.end_ms - cue.start_ms
     if duration_ms <= 0:
-        return [(word, cue.start_ms, cue.start_ms, "cue_proportional") for word in words]
+        return []
     tokens: list[tuple[str, int, int, TimingSource]] = []
     for index, word in enumerate(words):
         start_ms = cue.start_ms + round(duration_ms * index / len(words))

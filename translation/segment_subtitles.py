@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from translation.segmentation import (
@@ -31,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--clip-end-ms", type=int, help="Clip end in milliseconds")
     parser.add_argument("--padding-before-ms", type=int, default=0)
     parser.add_argument("--padding-after-ms", type=int, default=0)
-    parser.add_argument("--output-dir", required=True, help="Directory for segmentation artifacts")
+    parser.add_argument("--output-dir", help="Directory for segmentation artifacts")
     parser.add_argument("--max-unit-chars", type=int, default=180)
     parser.add_argument("--max-unit-duration-ms", type=int, default=7000)
     parser.add_argument("--max-source-cues", type=int, default=4)
@@ -58,11 +60,11 @@ def main(argv: list[str] | None = None) -> int:
             max_sentences=args.max_sentences,
         )
         result = segment_subtitles(source, options)
+        output_dir = _resolve_output_dir(args.output_dir)
     except (FileNotFoundError, ValueError, SegmentationValidationError) as exc:
         print(f"SegmentationValidationError: {exc}" if isinstance(exc, SegmentationValidationError) else f"Error: {exc}", file=sys.stderr)
         return 1
 
-    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / ARTIFACT_NAMES["segmented_source"]).write_text(result.to_segmented_srt_text(), encoding="utf-8")
     (output_dir / ARTIFACT_NAMES["translation_units"]).write_text(
@@ -76,6 +78,16 @@ def main(argv: list[str] | None = None) -> int:
     (output_dir / ARTIFACT_NAMES["report"]).write_text(result.to_report_markdown(), encoding="utf-8")
     _print_summary(result, output_dir)
     return 0
+
+
+def _resolve_output_dir(explicit_output_dir: str | None) -> Path:
+    if explicit_output_dir:
+        return Path(explicit_output_dir)
+    env_output_dir = os.getenv("YOUTUBE_CLIPS_OUTPUT_DIR") or None
+    if env_output_dir:
+        return Path(env_output_dir)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path("youtube-clips") / f"segmentation-{timestamp}"
 
 
 def _print_summary(result: SegmentationResult, output_dir: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -155,19 +156,31 @@ class SegmentationLibraryTests(unittest.TestCase):
         self.assertNotIn("now we're going to move on", result.units[0].source_text)
         self.assertTrue(result.units[1].source_text.startswith("now we're going to move on"))
 
-    def test_zero_duration_token_raises_segmentation_validation_error(self):
+    def test_malformed_zero_or_negative_duration_cues_are_skipped_with_warning(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             subtitle_path = Path(temp_dir) / "sample.srt"
             subtitle_path.write_text(
-                "1\n00:00:01,000 --> 00:00:01,000\nhello\n\n",
+                "1\n00:00:00,000 --> 00:00:02,000\nkeep me\n\n"
+                "2\n00:00:03,000 --> 00:00:03,000\nskip me\n\n"
+                "3\n00:00:05,000 --> 00:00:04,000\nskip me too\n\n",
                 encoding="utf-8",
             )
 
-            with self.assertRaises(SegmentationValidationError):
-                segment_subtitles(
-                    SubtitleSegmentationSource(mode="single_file", subtitle_path=subtitle_path),
-                    SegmentationOptions(),
-                )
+            result = segment_subtitles(
+                SubtitleSegmentationSource(mode="single_file", subtitle_path=subtitle_path),
+                SegmentationOptions(max_source_cues=1),
+            )
+
+        self.assertEqual([token.cue_id for token in result.active_tokens], ["1", "1"])
+        self.assertEqual([unit.source_text for unit in result.units], ["keep me"])
+        self.assertEqual(
+            [warning.code for warning in result.warnings if warning.code == "malformed_cue_skipped"],
+            ["malformed_cue_skipped", "malformed_cue_skipped"],
+        )
+        self.assertEqual(
+            [warning.cue_id for warning in result.warnings if warning.code == "malformed_cue_skipped"],
+            ["2", "3"],
+        )
 
     def test_payload_renderers_include_metadata_and_authoritative_source_spans(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -241,6 +254,93 @@ class SegmentationCliTests(unittest.TestCase):
         self.assertIn("mode: single_file", result.stdout)
         self.assertIn("units:", result.stdout)
         self.assertEqual(translation_units["schema_version"], "segmentation.v1")
+
+    def test_cli_defaults_to_env_output_dir_when_output_dir_omitted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nhello world\n\n",
+                encoding="utf-8",
+            )
+            output_dir = Path(temp_dir) / "env-out"
+            env = os.environ.copy()
+            env["YOUTUBE_CLIPS_OUTPUT_DIR"] = str(output_dir)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "translation.segment_subtitles",
+                    "--mode",
+                    "single_file",
+                    "--subtitle",
+                    str(subtitle_path),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+
+            artifact_names = sorted(path.name for path in output_dir.iterdir())
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            artifact_names,
+            [
+                "cue_map.json",
+                "segmentation_report.md",
+                "segmented_source.srt",
+                "translation_units.json",
+            ],
+        )
+        self.assertIn(str(output_dir), result.stdout)
+
+    def test_cli_defaults_to_timestamped_output_dir_when_output_dir_omitted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "sample.srt"
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nhello world\n\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.pop("YOUTUBE_CLIPS_OUTPUT_DIR", None)
+            env["PYTHONPATH"] = str(REPO_ROOT)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "translation.segment_subtitles",
+                    "--mode",
+                    "single_file",
+                    "--subtitle",
+                    str(subtitle_path),
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+
+            output_root = Path(temp_dir) / "youtube-clips"
+            output_dirs = [path for path in output_root.iterdir() if path.is_dir()]
+            artifact_names = sorted(path.name for path in output_dirs[0].iterdir())
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(output_dirs), 1)
+        self.assertRegex(output_dirs[0].name, r"^segmentation-\d{8}-\d{6}$")
+        self.assertEqual(
+            artifact_names,
+            [
+                "cue_map.json",
+                "segmentation_report.md",
+                "segmented_source.srt",
+                "translation_units.json",
+            ],
+        )
 
     def test_cli_avoids_partial_outputs_on_fatal_validation_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
