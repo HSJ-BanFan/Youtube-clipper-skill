@@ -2933,6 +2933,226 @@ class TranslationPipelineExecutionTests(unittest.TestCase):
                     run_translation_pipeline(subtitle_path, config)
 
 
+class TranslationSegmentationPipelineIntegrationTests(unittest.TestCase):
+    def test_default_off_path_skips_segmentation_and_writes_no_segmentation_artifacts(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps(
+                    [
+                        {"id": "1", "translation": "你好"},
+                        {"id": "2", "translation": "世界"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                qa_mode="none",
+                cache_enabled=False,
+            )
+
+            with patch("translation.pipeline.segment_subtitles", side_effect=AssertionError("segmenter should not be called")):
+                with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                    run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+
+        self.assertEqual(translated.count("-->"), 2)
+        self.assertIn("你好", translated)
+        self.assertIn("世界", translated)
+        self.assertIn("你好\nhello", bilingual)
+        self.assertIn("世界\nworld", bilingual)
+        self.assertFalse((output_dir / "segmented_source.srt").exists())
+        self.assertFalse((output_dir / "translation_units.json").exists())
+        self.assertFalse((output_dir / "cue_map.json").exists())
+        self.assertFalse((output_dir / "segmentation_report.md").exists())
+
+    def test_enabled_single_file_segmentation_path_uses_segment_units_and_writes_artifacts(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "u001", "translation": "你好世界"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                qa_mode="none",
+                cache_enabled=False,
+                preprocess_auto_subs=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+            segmented_source = (output_dir / "segmented_source.srt").read_text(encoding="utf-8")
+            translation_units_payload = json.loads((output_dir / "translation_units.json").read_text(encoding="utf-8"))
+            cue_map_payload = json.loads((output_dir / "cue_map.json").read_text(encoding="utf-8"))
+            segmentation_report = (output_dir / "segmentation_report.md").read_text(encoding="utf-8")
+
+        unit_payload = translation_units_payload["units"][0]
+        self.assertEqual(translated.count("-->"), 1)
+        self.assertIn("你好世界", translated)
+        self.assertIn("你好世界\nhello world", bilingual)
+        self.assertIn("hello world", segmented_source)
+        self.assertEqual(unit_payload["unit_id"], "u001")
+        self.assertEqual(unit_payload["source_cue_ids"], ["1", "2"])
+        self.assertNotEqual(unit_payload["unit_id"], unit_payload["source_cue_ids"][0])
+        self.assertNotEqual(unit_payload["unit_id"], unit_payload["source_cue_ids"][1])
+        self.assertEqual(cue_map_payload["units"]["u001"]["source_cue_ids"], ["1", "2"])
+        self.assertEqual([span["cue_id"] for span in unit_payload["source_spans"]], ["1", "2"])
+        self.assertIn("# Segmentation Report", segmentation_report)
+
+    def test_padding_only_units_are_excluded_from_outputs_but_retained_in_artifacts(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "u002", "translation": "片段"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_full_vtt_padding_case(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                qa_mode="none",
+                cache_enabled=False,
+                preprocess_auto_subs=True,
+                auto_sub_source_mode="full_vtt_window",
+                auto_sub_full_vtt_path=str(subtitle_path),
+                auto_sub_clip_start_ms=1000,
+                auto_sub_clip_end_ms=3000,
+                auto_sub_padding_before_ms=1000,
+                auto_sub_padding_after_ms=1000,
+                segment_max_source_cues=1,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            translated = (output_dir / "translated.zh-CN.srt").read_text(encoding="utf-8")
+            bilingual = (output_dir / "bilingual.srt").read_text(encoding="utf-8")
+            translation_units = (output_dir / "translation_units.json").read_text(encoding="utf-8")
+
+        self.assertEqual(translated.count("-->"), 1)
+        self.assertIn("片段", translated)
+        self.assertIn("片段\ninside clip", bilingual)
+        self.assertIn('"boundary_type": "padding_only"', translation_units)
+        self.assertNotIn("pad before", bilingual)
+        self.assertNotIn("pad after", bilingual)
+
+    def test_preprocess_auto_subs_changes_effective_cache_identity_for_same_input(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                if 'u001' in prompt:
+                    return json.dumps([{"id": "u001", "translation": "你好世界"}])
+                return json.dumps(
+                    [
+                        {"id": "1", "translation": "你好"},
+                        {"id": "2", "translation": "世界"},
+                    ]
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            cache_path = root / "translation-cache.sqlite3"
+            disabled_output_dir = root / "disabled"
+            enabled_output_dir = root / "enabled"
+            disabled_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(disabled_output_dir),
+                cache_path=str(cache_path),
+                batch_size=2,
+                qa_mode="none",
+            )
+            enabled_config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(enabled_output_dir),
+                cache_path=str(cache_path),
+                batch_size=2,
+                qa_mode="none",
+                preprocess_auto_subs=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, disabled_config)
+                disabled_keys = _read_cache_keys(cache_path)
+                run_translation_pipeline(subtitle_path, enabled_config)
+                enabled_keys = _read_cache_keys(cache_path)
+
+        self.assertEqual(len(disabled_keys), 1)
+        self.assertEqual(len(enabled_keys), 2)
+        self.assertIn(disabled_keys[0], enabled_keys)
+        self.assertEqual(len(set(enabled_keys)), 2)
+
+    def test_full_vtt_window_missing_requirements_fail_before_provider_construction(self):
+        class FailingProvider:
+            def __init__(self, config):
+                raise AssertionError("provider should not be constructed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+
+            config_factories = {
+                "missing_full_vtt_path": lambda: TranslationConfig(
+                    api_key="test-secret",
+                    output_dir=str(root / "out1"),
+                    preprocess_auto_subs=True,
+                    auto_sub_source_mode="full_vtt_window",
+                    auto_sub_clip_start_ms=1000,
+                    auto_sub_clip_end_ms=2000,
+                ),
+                "missing_clip_start": lambda: TranslationConfig(
+                    api_key="test-secret",
+                    output_dir=str(root / "out2"),
+                    preprocess_auto_subs=True,
+                    auto_sub_source_mode="full_vtt_window",
+                    auto_sub_full_vtt_path=str(subtitle_path),
+                    auto_sub_clip_end_ms=2000,
+                ),
+                "missing_clip_end": lambda: TranslationConfig(
+                    api_key="test-secret",
+                    output_dir=str(root / "out3"),
+                    preprocess_auto_subs=True,
+                    auto_sub_source_mode="full_vtt_window",
+                    auto_sub_full_vtt_path=str(subtitle_path),
+                    auto_sub_clip_start_ms=1000,
+                ),
+            }
+
+            for case_name, config_factory in config_factories.items():
+                with self.subTest(case_name=case_name):
+                    with patch("translation.pipeline.OpenAICompatibleProvider", FailingProvider):
+                        with self.assertRaises(ValueError):
+                            run_translation_pipeline(subtitle_path, config_factory())
+
+
 def _write_one_cue_srt(temp_dir: Path) -> Path:
     subtitle_path = temp_dir / "sample.srt"
     subtitle_path.write_text(
@@ -2990,6 +3210,21 @@ def _write_eight_cue_srt(temp_dir: Path) -> Path:
     return subtitle_path
 
 
+def _write_full_vtt_padding_case(temp_dir: Path) -> Path:
+    subtitle_path = temp_dir / "sample.vtt"
+    subtitle_path.write_text(
+        "WEBVTT\n\n"
+        "00:00:00.000 --> 00:00:00.500\n"
+        "pad before\n\n"
+        "00:00:01.000 --> 00:00:02.000\n"
+        "inside clip\n\n"
+        "00:00:03.500 --> 00:00:03.900\n"
+        "pad after\n\n",
+        encoding="utf-8",
+    )
+    return subtitle_path
+
+
 def _write_glossary(temp_dir: Path) -> Path:
     glossary_path = temp_dir / "glossary.md"
     glossary_path.write_text("hello => 你好", encoding="utf-8")
@@ -3000,6 +3235,15 @@ def _read_cache_rows(cache_path: Path) -> list[str]:
     connection = sqlite3.connect(cache_path)
     try:
         rows = connection.execute("SELECT result_json FROM translation_cache").fetchall()
+        return [str(row[0]) for row in rows]
+    finally:
+        connection.close()
+
+
+def _read_cache_keys(cache_path: Path) -> list[str]:
+    connection = sqlite3.connect(cache_path)
+    try:
+        rows = connection.execute("SELECT cache_key FROM translation_cache ORDER BY updated_at, cache_key").fetchall()
         return [str(row[0]) for row in rows]
     finally:
         connection.close()

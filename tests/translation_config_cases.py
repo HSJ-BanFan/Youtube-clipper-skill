@@ -387,6 +387,53 @@ class TranslationConfigTests(unittest.TestCase):
 
         self.assertNotIn("--api-key", str(error.exception))
 
+    def test_auto_sub_preprocess_defaults_off_and_env_values_load(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={
+                "TRANSLATION_PREPROCESS_AUTO_SUBS": "true",
+                "TRANSLATION_AUTO_SUB_SOURCE_MODE": "single_file",
+                "TRANSLATION_AUTO_SUB_PADDING_BEFORE_MS": "12000",
+                "TRANSLATION_AUTO_SUB_PADDING_AFTER_MS": "8000",
+                "TRANSLATION_SEGMENT_MAX_UNIT_CHARS": "200",
+                "TRANSLATION_SEGMENT_MAX_UNIT_DURATION_MS": "9000",
+                "TRANSLATION_SEGMENT_MAX_SOURCE_CUES": "6",
+                "TRANSLATION_SEGMENT_MAX_SENTENCES": "3",
+            },
+        )
+
+        default_config = TranslationConfig()
+
+        self.assertFalse(default_config.preprocess_auto_subs)
+        self.assertTrue(config.preprocess_auto_subs)
+        self.assertEqual(config.auto_sub_source_mode, "single_file")
+        self.assertEqual(config.auto_sub_padding_before_ms, 12000)
+        self.assertEqual(config.auto_sub_padding_after_ms, 8000)
+        self.assertEqual(config.segment_max_unit_chars, 200)
+        self.assertEqual(config.segment_max_unit_duration_ms, 9000)
+        self.assertEqual(config.segment_max_source_cues, 6)
+        self.assertEqual(config.segment_max_sentences, 3)
+
+    def test_full_vtt_window_requires_path_and_clip_bounds_when_preprocessing_enabled(self):
+        with self.assertRaisesRegex(ValueError, "auto_sub_full_vtt_path is required"):
+            TranslationConfig(preprocess_auto_subs=True, auto_sub_source_mode="full_vtt_window")
+
+        with self.assertRaisesRegex(ValueError, "auto_sub_clip_start_ms is required"):
+            TranslationConfig(
+                preprocess_auto_subs=True,
+                auto_sub_source_mode="full_vtt_window",
+                auto_sub_full_vtt_path="raw.vtt",
+            )
+
+        with self.assertRaisesRegex(ValueError, "auto_sub_clip_end_ms is required"):
+            TranslationConfig(
+                preprocess_auto_subs=True,
+                auto_sub_source_mode="full_vtt_window",
+                auto_sub_full_vtt_path="raw.vtt",
+                auto_sub_clip_start_ms=1000,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,6 +118,17 @@ class TranslationCacheTests(unittest.TestCase):
             "output_path": TranslationConfig(api_key="test-secret", output_path="single.srt"),
             "dry_run": TranslationConfig(api_key="test-secret", dry_run=True),
             "overwrite": TranslationConfig(api_key="test-secret", overwrite=True),
+            "preprocess_auto_subs": TranslationConfig(api_key="test-secret", preprocess_auto_subs=True),
+            "auto_sub_source_mode": TranslationConfig(api_key="test-secret", auto_sub_source_mode="full_vtt_window"),
+            "auto_sub_full_vtt_path": TranslationConfig(api_key="test-secret", auto_sub_full_vtt_path="raw.vtt"),
+            "auto_sub_clip_start_ms": TranslationConfig(api_key="test-secret", auto_sub_clip_start_ms=1000),
+            "auto_sub_clip_end_ms": TranslationConfig(api_key="test-secret", auto_sub_clip_end_ms=5000),
+            "auto_sub_padding_before_ms": TranslationConfig(api_key="test-secret", auto_sub_padding_before_ms=5000),
+            "auto_sub_padding_after_ms": TranslationConfig(api_key="test-secret", auto_sub_padding_after_ms=5000),
+            "segment_max_unit_chars": TranslationConfig(api_key="test-secret", segment_max_unit_chars=220),
+            "segment_max_unit_duration_ms": TranslationConfig(api_key="test-secret", segment_max_unit_duration_ms=9000),
+            "segment_max_source_cues": TranslationConfig(api_key="test-secret", segment_max_source_cues=6),
+            "segment_max_sentences": TranslationConfig(api_key="test-secret", segment_max_sentences=3),
         }
 
         for field_name, config in variants.items():
