@@ -15,7 +15,7 @@ from translation.cache import CacheEntry, TranslationCache, build_batch_cache_ke
 from translation.config import TranslationConfig
 from translation.context import build_global_context, write_global_context
 from translation.glossary import load_glossary
-from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorType, MinimalBatchReportEntry, PipelineResult, TranslationBatch, TranslationOutputPaths
+from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorType, MinimalBatchReportEntry, PipelineResult, SEGMENTATION_ARTIFACT_CUE_MAP, SEGMENTATION_ARTIFACT_REPORT, SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE, SEGMENTATION_ARTIFACT_TRANSLATION_UNITS, TranslationBatch, TranslationOutputPaths
 from translation.prompts import (
     QA_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -25,7 +25,7 @@ from translation.prompts import (
 )
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
 from translation.qa import QACandidate, find_suspicious_translations
-from translation.report import QAStats, TranslationStats, write_translation_report
+from translation.report import AutoSubSegmentationStats, QAStats, TranslationStats, write_translation_report
 from translation.segmentation import SegmentBoundaryType, SegmentationOptions, SegmentationResult, SegmentUnit, SubtitleSegmentationSource, segment_subtitles
 from translation.subtitles import (
     detect_subtitle_format,
@@ -179,6 +179,11 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     batches = create_batches(cues, config.batch_size, config.context_before, config.context_after)
     stats = TranslationStats(total_batches=len(batches))
+    if prepared_inputs.segmentation_result is not None:
+        stats.auto_sub_segmentation = _build_auto_sub_segmentation_stats(
+            prepared_inputs.segmentation_result,
+            translated_segment_unit_count=len(cues),
+        )
     all_translations: dict[str, str] = {}
 
     batch_results = _run_translation_batches(
@@ -296,27 +301,46 @@ def _segment_unit_to_cue(unit: SegmentUnit, index: int) -> Cue:
 
 
 
+def _build_auto_sub_segmentation_stats(
+    segmentation_result: SegmentationResult,
+    translated_segment_unit_count: int,
+) -> AutoSubSegmentationStats:
+    return AutoSubSegmentationStats(
+        source_mode=segmentation_result.source.mode,
+        segmentation_strategy_version=segmentation_result.options.segmentation_strategy_version,
+        timing_strategy_version=segmentation_result.options.timing_strategy_version,
+        original_cue_count=segmentation_result.stats.original_cue_count,
+        window_cue_count=segmentation_result.stats.extracted_cue_count,
+        cleaned_active_token_count=segmentation_result.stats.cleaned_active_token_count,
+        translation_unit_count=segmentation_result.stats.translation_unit_count,
+        translated_segment_unit_count=translated_segment_unit_count,
+        skipped_padding_only_unit_count=segmentation_result.stats.padding_only_unit_count,
+        warning_count=segmentation_result.stats.warning_count,
+    )
+
+
+
 def _write_segmentation_artifacts(segmentation_result: SegmentationResult, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "segmented_source.srt").write_text(segmentation_result.to_segmented_srt_text(), encoding="utf-8")
-    (output_dir / "translation_units.json").write_text(
+    (output_dir / SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE).write_text(segmentation_result.to_segmented_srt_text(), encoding="utf-8")
+    (output_dir / SEGMENTATION_ARTIFACT_TRANSLATION_UNITS).write_text(
         json.dumps(segmentation_result.to_translation_units_payload(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (output_dir / "cue_map.json").write_text(
+    (output_dir / SEGMENTATION_ARTIFACT_CUE_MAP).write_text(
         json.dumps(segmentation_result.to_cue_map_payload(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (output_dir / "segmentation_report.md").write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
+    (output_dir / SEGMENTATION_ARTIFACT_REPORT).write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
 
 
 
 def _segmentation_artifact_paths(output_dir: Path) -> list[Path]:
     return [
-        output_dir / "segmented_source.srt",
-        output_dir / "translation_units.json",
-        output_dir / "cue_map.json",
-        output_dir / "segmentation_report.md",
+        output_dir / SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE,
+        output_dir / SEGMENTATION_ARTIFACT_TRANSLATION_UNITS,
+        output_dir / SEGMENTATION_ARTIFACT_CUE_MAP,
+        output_dir / SEGMENTATION_ARTIFACT_REPORT,
     ]
 
 

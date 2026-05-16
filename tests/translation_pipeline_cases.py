@@ -3020,6 +3020,42 @@ class TranslationSegmentationPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual([span["cue_id"] for span in unit_payload["source_spans"]], ["1", "2"])
         self.assertIn("# Segmentation Report", segmentation_report)
 
+    def test_enabled_segmentation_report_includes_auto_sub_section_and_artifact_links(self):
+        class FakeProvider:
+            def __init__(self, config):
+                self.config = config
+
+            def translate_batch(self, prompt):
+                return json.dumps([{"id": "u001", "translation": "你好世界"}])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subtitle_path = _write_two_cue_srt(root)
+            output_dir = root / "out"
+            config = TranslationConfig(
+                api_key="test-secret",
+                output_dir=str(output_dir),
+                batch_size=2,
+                qa_mode="none",
+                cache_enabled=False,
+                preprocess_auto_subs=True,
+            )
+
+            with patch("translation.pipeline.OpenAICompatibleProvider", FakeProvider):
+                run_translation_pipeline(subtitle_path, config)
+
+            report = (output_dir / "translation_report.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Auto-sub Segmentation", report)
+        self.assertIn("- enabled: true", report)
+        self.assertIn("- source_mode: single_file", report)
+        self.assertIn("- segmentation_strategy_version: cycle1-rules-v1", report)
+        self.assertIn("- timing_strategy_version: cycle1-timing-v1", report)
+        self.assertIn("- segmentation_report: segmentation_report.md", report)
+        self.assertIn("- translation_units: translation_units.json", report)
+        self.assertIn("- cue_map: cue_map.json", report)
+        self.assertIn("- segmented_source: segmented_source.srt", report)
+
     def test_padding_only_units_are_excluded_from_outputs_but_retained_in_artifacts(self):
         class FakeProvider:
             def __init__(self, config):

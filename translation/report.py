@@ -7,10 +7,31 @@ from typing import Any, Sequence
 from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
-from translation.models import MinimalBatchReportEntry, PipelineResult
+from translation.models import (
+    SEGMENTATION_ARTIFACT_CUE_MAP,
+    SEGMENTATION_ARTIFACT_REPORT,
+    SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE,
+    SEGMENTATION_ARTIFACT_TRANSLATION_UNITS,
+    MinimalBatchReportEntry,
+    PipelineResult,
+)
 from translation.qa import QAIssue
 
 REPORT_SCHEMA_VERSION = "translation-v2-report-v2"
+
+
+@dataclass(frozen=True)
+class AutoSubSegmentationStats:
+    source_mode: str
+    segmentation_strategy_version: str
+    timing_strategy_version: str
+    original_cue_count: int
+    window_cue_count: int
+    cleaned_active_token_count: int
+    translation_unit_count: int
+    translated_segment_unit_count: int
+    skipped_padding_only_unit_count: int
+    warning_count: int
 
 
 @dataclass
@@ -46,6 +67,7 @@ class TranslationStats:
     adaptive_concurrency_pressure_events: int = 0
     batch_entries: list[MinimalBatchReportEntry] = field(default_factory=list)
     qa: QAStats | None = None
+    auto_sub_segmentation: AutoSubSegmentationStats | None = None
 
 
 def write_translation_report(
@@ -78,6 +100,8 @@ def _render_report(
 ) -> str:
     lines = ["# Translation Report", "", f"- report_schema_version: {REPORT_SCHEMA_VERSION}"]
     lines.extend(_render_section("Run Summary", _run_summary_entries(result, stats)))
+    if stats.auto_sub_segmentation is not None:
+        lines.extend(_render_section("Auto-sub Segmentation", _auto_sub_segmentation_entries(stats.auto_sub_segmentation)))
     lines.extend(_render_section("Config Snapshot", _config_snapshot_entries(safe_config, glossary, context)))
     lines.extend(_render_section("Cache Summary", _cache_summary_entries(safe_config, stats)))
     lines.extend(_render_section("Provider / Fallback Summary", _provider_summary_entries(safe_config, stats)))
@@ -122,6 +146,26 @@ def _run_summary_entries(result: PipelineResult, stats: TranslationStats) -> lis
         f"- retries: {stats.retries}",
         f"- failed_batches: {stats.failed_batches}",
         f"- final_status: {final_status}",
+    ]
+
+
+def _auto_sub_segmentation_entries(stats: AutoSubSegmentationStats) -> list[str]:
+    return [
+        "- enabled: true",
+        f"- source_mode: {stats.source_mode}",
+        f"- segmentation_strategy_version: {stats.segmentation_strategy_version}",
+        f"- timing_strategy_version: {stats.timing_strategy_version}",
+        f"- original_cue_count: {stats.original_cue_count}",
+        f"- window_cue_count: {stats.window_cue_count}",
+        f"- cleaned_active_token_count: {stats.cleaned_active_token_count}",
+        f"- translation_unit_count: {stats.translation_unit_count}",
+        f"- translated_segment_unit_count: {stats.translated_segment_unit_count}",
+        f"- skipped_padding_only_unit_count: {stats.skipped_padding_only_unit_count}",
+        f"- warning_count: {stats.warning_count}",
+        f"- segmentation_report: {SEGMENTATION_ARTIFACT_REPORT}",
+        f"- translation_units: {SEGMENTATION_ARTIFACT_TRANSLATION_UNITS}",
+        f"- cue_map: {SEGMENTATION_ARTIFACT_CUE_MAP}",
+        f"- segmented_source: {SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE}",
     ]
 
 

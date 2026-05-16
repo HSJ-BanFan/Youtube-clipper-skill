@@ -16,6 +16,7 @@ English | [简体中文](README.zh-CN.md)
 - **AI Semantic Analysis** - Generate fine-grained chapters (2-5 minutes each) by understanding video content, not just mechanical time splitting
 - **Precise Clipping** - Use FFmpeg to extract video segments with frame-accurate timing
 - **Bilingual Subtitles** - Batch translate subtitles to Chinese/English with 95% API call reduction
+- **Opt-in Auto-sub Preprocessing** - Segment messy YouTube auto-generated subtitles into cleaner translation units before Translation V2 runs
 - **Subtitle Burning** - Hardcode bilingual subtitles into videos with customizable styling
 - **Content Summarization** - Auto-generate social media content (Xiaohongshu, Douyin, WeChat)
 
@@ -247,6 +248,39 @@ TRANSLATION_CACHE=false
 TRANSLATION_FAILURE_MODE=strict
 ```
 
+### Auto-sub preprocessing (opt-in)
+
+Use this only when subtitle source is noisy YouTube auto-generated text. For manual subtitles, default is off and manual subtitles usually keep preprocessing off.
+
+```bash
+TRANSLATION_PREPROCESS_AUTO_SUBS=false
+TRANSLATION_AUTO_SUB_SOURCE_MODE=single_file
+TRANSLATION_AUTO_SUB_FULL_VTT_PATH=
+TRANSLATION_AUTO_SUB_CLIP_START_MS=
+TRANSLATION_AUTO_SUB_CLIP_END_MS=
+TRANSLATION_AUTO_SUB_PADDING_BEFORE_MS=10000
+TRANSLATION_AUTO_SUB_PADDING_AFTER_MS=10000
+TRANSLATION_SEGMENT_MAX_UNIT_CHARS=180
+TRANSLATION_SEGMENT_MAX_UNIT_DURATION_MS=7000
+TRANSLATION_SEGMENT_MAX_SOURCE_CUES=5
+TRANSLATION_SEGMENT_MAX_SENTENCES=2
+```
+
+Rules and operator guidance:
+- default is off
+- recommended only for YouTube auto-generated subtitles
+- manual subtitles usually keep preprocessing off
+- single_file is degraded fallback
+- full_vtt_window is recommended mode
+- raw full VTT should be preserved when available
+- clip_start_ms / clip_end_ms use original-video absolute milliseconds
+- padding is segmentation context only
+- padding_only units do not enter final translated/bilingual outputs
+- enabled mode writes `segmented_source.srt`, `translation_units.json`, `cue_map.json`, and `segmentation_report.md`
+- `translation_report.md` links those artifacts when preprocessing is enabled
+- segmented and non-segmented runs are cache-isolated effectively because translation input identity changes and `batch_source_hash` changes with segmented cues/source text/timing
+- current release keeps cache schema unchanged; isolation is effective, not schema-expanded
+
 ### Other important knobs
 
 - `TRANSLATION_REVIEW_MODEL` defaults to `TRANSLATION_MODEL` when empty.
@@ -375,6 +409,19 @@ Run this checklist before calling a Translation V2 setup release-ready.
 - [ ] **global context artifact**: inspect generated `global_context.md` when present
 - [ ] **bilingual output**: confirm bilingual subtitle ordering and cue alignment on a representative sample
 - [ ] **long subtitle test**: run one long subtitle input end-to-end and confirm output, report, and cache artifacts remain usable
+
+### Auto-sub preprocessing smoke guide
+
+Use P03 412-416 style semantic drift samples before calling this feature release-ready.
+
+- [ ] run `single_file` fallback once
+- [ ] run `full_vtt_window` when preserved raw VTT is available
+- [ ] inspect `segmented_source.srt` and confirm semantic boundaries are no longer split at bad auto-sub cue edges
+- [ ] inspect `bilingual.srt` and confirm source line comes from segmented source text
+- [ ] inspect `translation_units.json` and confirm `source_spans` are present
+- [ ] inspect `cue_map.json` and confirm original cue traceability is preserved
+- [ ] inspect `segmentation_report.md` for warnings / cleanup stats
+- [ ] inspect `translation_report.md` and confirm Auto-sub Segmentation section links artifact filenames
 
 ## Troubleshooting
 
