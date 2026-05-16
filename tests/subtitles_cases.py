@@ -142,6 +142,56 @@ class SubtitleParserTests(unittest.TestCase):
         self.assertEqual(cues[0].start, "00:00:00,000")
         self.assertEqual(cues[0].end, "00:00:01,000")
 
+    def test_parse_vtt_with_youtube_header_metadata(self):
+        cues = parse_vtt(
+            "WEBVTT\n"
+            "Kind: captions\n"
+            "Language: en\n"
+            "\n"
+            "00:00:00.160 --> 00:00:02.550 align:start position:0%\n"
+            "hello world\n\n"
+        )
+
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0].source, "hello world")
+
+    def test_parse_vtt_with_youtube_blank_after_timing(self):
+        cues = parse_vtt(
+            "WEBVTT\n"
+            "Kind: captions\n"
+            "Language: en\n"
+            "\n"
+            "00:00:00.160 --> 00:00:02.550 align:start position:0%\n"
+            " \n"
+            "this<00:00:00.359><c> video</c><00:00:00.760><c> has</c> content\n\n"
+        )
+
+        self.assertEqual(len(cues), 1)
+        self.assertIn("<00:00:00.359>", cues[0].source)
+        self.assertIn("video", cues[0].source)
+
+    def test_parse_vtt_with_youtube_rolling_caption_block(self):
+        cues = parse_vtt(
+            "WEBVTT\n"
+            "Kind: captions\n"
+            "Language: en\n"
+            "\n"
+            "00:00:00.160 --> 00:00:02.550 align:start position:0%\n"
+            " \n"
+            "this<00:00:00.359><c> video</c>\n\n"
+            "00:00:02.550 --> 00:00:02.560 align:start position:0%\n"
+            "this video\n"
+            " \n\n"
+            "00:00:02.560 --> 00:00:06.230 align:start position:0%\n"
+            "this video\n"
+            "and<00:00:02.760><c> contains</c><00:00:03.360><c> content</c>\n\n"
+        )
+
+        self.assertEqual(len(cues), 3)
+        self.assertEqual(cues[0].start, "00:00:00,160")
+        self.assertEqual(cues[2].start, "00:00:02,560")
+        self.assertIn("<00:00:02.760>", cues[2].source)
+
     def test_parse_vtt_accepts_hourless_timestamps(self):
         cues = parse_vtt("WEBVTT\n\n01:23.456 --> 01:25.000\nhello\n\n")
 

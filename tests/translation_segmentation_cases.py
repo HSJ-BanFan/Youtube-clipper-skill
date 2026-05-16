@@ -374,5 +374,72 @@ class SegmentationCliTests(unittest.TestCase):
         self.assertFalse(output_dir.exists())
 
 
+class YoutubeAutoSubVttSegmentationTests(unittest.TestCase):
+    def test_full_vtt_window_uses_inline_timing_on_youtube_rolling_caption(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "youtube.vtt"
+            subtitle_path.write_text(
+                "WEBVTT\n"
+                "Kind: captions\n"
+                "Language: en\n"
+                "\n"
+                "00:00:00.160 --> 00:00:02.550 align:start position:0%\n"
+                " \n"
+                "this<00:00:00.359><c> video</c><00:00:00.760><c> has</c><00:00:01.240><c> content</c>\n\n"
+                "00:00:02.550 --> 00:00:02.560 align:start position:0%\n"
+                "this video has content\n"
+                " \n\n"
+                "00:00:02.560 --> 00:00:06.230 align:start position:0%\n"
+                "this video has content\n"
+                "and<00:00:02.760><c> contains</c><00:00:03.360><c> projects</c>\n\n",
+                encoding="utf-8",
+            )
+            source = SubtitleSegmentationSource(
+                mode="full_vtt_window",
+                full_vtt_path=subtitle_path,
+                clip_start_ms=0,
+                clip_end_ms=6230,
+                padding_before_ms=0,
+                padding_after_ms=0,
+            )
+
+            result = segment_subtitles(source, SegmentationOptions())
+
+        self.assertEqual(result.stats.original_cue_count, 3)
+        self.assertGreater(result.stats.inline_timing_token_count, 0)
+        invalid_inline = [w for w in result.warnings if w.code == "invalid_inline_timing"]
+        self.assertEqual(invalid_inline, [])
+        unit_texts = [unit.source_text for unit in result.units]
+        merged = " ".join(unit_texts)
+        self.assertIn("contains", merged)
+        self.assertIn("projects", merged)
+
+    def test_long_rolling_caption_overlap_is_removed_beyond_old_eight_token_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = Path(temp_dir) / "long_overlap.srt"
+            # Simulates a YouTube rolling caption where the overlapping previous
+            # text is 9+ tokens, exceeding the legacy MAX_ROLLING_OVERLAP_TOKENS=8.
+            subtitle_path.write_text(
+                "1\n00:00:00,000 --> 00:00:03,000\n"
+                "what you can do is go down to the\n\n"
+                "2\n00:00:03,000 --> 00:00:06,000\n"
+                "what you can do is go down to the description\n\n",
+                encoding="utf-8",
+            )
+
+            result = segment_subtitles(
+                SubtitleSegmentationSource(mode="single_file", subtitle_path=subtitle_path),
+                SegmentationOptions(),
+            )
+
+        merged = " ".join(unit.source_text for unit in result.units)
+        # Old behavior would leave the 9-token previous-text intact, producing:
+        #   "what you can do is go down to the what you can do is go down to the description"
+        self.assertNotIn("the what you can do is go down to the description", merged)
+        self.assertIn("description", merged)
+        rolling_warnings = [w for w in result.warnings if w.code == "rolling_overlap_removed"]
+        self.assertTrue(rolling_warnings)
+
+
 if __name__ == "__main__":
     unittest.main()

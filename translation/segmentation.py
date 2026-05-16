@@ -13,7 +13,7 @@ from translation.subtitles import detect_subtitle_format, format_timestamp, pars
 
 SCHEMA_VERSION = "segmentation.v1"
 LOCAL_DUPLICATE_THRESHOLD_MS = 150
-MAX_ROLLING_OVERLAP_TOKENS = 8
+MAX_ROLLING_OVERLAP_TOKENS = 20
 DANGLING_CONTINUATION_CAP_TOKENS = 4
 DEFAULT_STRONG_BOUNDARY_PHRASES = (
     "now we're going to move on",
@@ -391,7 +391,7 @@ def segment_subtitles(source: SubtitleSegmentationSource, options: SegmentationO
         unknown_timing_token_count=sum(1 for token in active_tokens if token.timing_source == "unknown"),
         forced_split_count=forced_split_count,
         padding_only_unit_count=sum(1 for unit in units if unit.is_padding_only),
-        warning_count=len(all_warnings),
+        warning_count=sum(1 for w in all_warnings if w.severity == "warning"),
     )
     return SegmentationResult(
         source=source,
@@ -535,7 +535,7 @@ def _tokenize_cue(
             SegmentationWarning(
                 code="proportional_timing_fallback",
                 message="inline timing unavailable or invalid; used cue-proportional timing",
-                severity="warning",
+                severity="info",
                 cue_id=cue.cue_id,
             )
         )
@@ -564,6 +564,28 @@ def _parse_vtt_inline_tokens(
         return None, None
     if not saw_inline:
         return None, None
+    # YouTube auto-sub VTT prefixes each cue with the previous cue's plain text
+    # (no inline timing) followed by the new tokens with inline timing. Assign
+    # synthetic proportional timing within [cue.start_ms, first_inline_ms] so the
+    # leading prefix can still participate in rolling-overlap dedup against the
+    # prior cue while the inline-timed tokens keep their authoritative timing.
+    first_timed_index = next(
+        (idx for idx, (_, start) in enumerate(token_starts) if start is not None),
+        None,
+    )
+    if first_timed_index is None:
+        return None, None
+    if first_timed_index > 0:
+        first_inline_ms = token_starts[first_timed_index][1]
+        assert first_inline_ms is not None
+        if first_inline_ms > cue.start_ms:
+            span_ms = first_inline_ms - cue.start_ms
+            for i in range(first_timed_index):
+                text, _ = token_starts[i]
+                synthetic = cue.start_ms + (span_ms * i) // first_timed_index
+                token_starts[i] = (text, synthetic)
+        else:
+            token_starts = token_starts[first_timed_index:]
     if any(start is None for _, start in token_starts):
         return None, SegmentationWarning(
             code="invalid_inline_timing",
@@ -658,7 +680,7 @@ def _cleanup_tokens(
                     SegmentationWarning(
                         code="rolling_overlap_removed",
                         message=f"removed {overlap} rolling overlap tokens",
-                        severity="warning",
+                        severity="info",
                         cue_id=cue.cue_id,
                     )
                 )
