@@ -25,7 +25,7 @@ from translation.prompts import (
 )
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
 from translation.qa import QACandidate, find_suspicious_translations
-from translation.report import QAStats, TranslationStats, write_translation_report
+from translation.report import AutoSubSegmentationStats, QAStats, TranslationStats, write_translation_report
 from translation.segmentation import SegmentBoundaryType, SegmentationOptions, SegmentationResult, SegmentUnit, SubtitleSegmentationSource, segment_subtitles
 from translation.subtitles import (
     detect_subtitle_format,
@@ -179,6 +179,11 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     batches = create_batches(cues, config.batch_size, config.context_before, config.context_after)
     stats = TranslationStats(total_batches=len(batches))
+    if prepared_inputs.segmentation_result is not None:
+        stats.auto_sub_segmentation = _build_auto_sub_segmentation_stats(
+            prepared_inputs.segmentation_result,
+            translated_segment_unit_count=len(cues),
+        )
     all_translations: dict[str, str] = {}
 
     batch_results = _run_translation_batches(
@@ -292,6 +297,25 @@ def _segment_unit_to_cue(unit: SegmentUnit, index: int) -> Cue:
         end=end,
         source=unit.source_text,
         raw_timing=f"{start} --> {end}",
+    )
+
+
+
+def _build_auto_sub_segmentation_stats(
+    segmentation_result: SegmentationResult,
+    translated_segment_unit_count: int,
+) -> AutoSubSegmentationStats:
+    return AutoSubSegmentationStats(
+        source_mode=segmentation_result.source.mode,
+        segmentation_strategy_version=segmentation_result.options.segmentation_strategy_version,
+        timing_strategy_version=segmentation_result.options.timing_strategy_version,
+        original_cue_count=segmentation_result.stats.original_cue_count,
+        window_cue_count=segmentation_result.stats.extracted_cue_count,
+        cleaned_active_token_count=segmentation_result.stats.cleaned_active_token_count,
+        translation_unit_count=segmentation_result.stats.translation_unit_count,
+        translated_segment_unit_count=translated_segment_unit_count,
+        skipped_padding_only_unit_count=segmentation_result.stats.padding_only_unit_count,
+        warning_count=segmentation_result.stats.warning_count,
     )
 
 

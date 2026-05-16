@@ -9,7 +9,7 @@ from translation.context import GlobalContext
 from translation.glossary import Glossary
 from translation.models import BatchState, MinimalBatchReportEntry, PipelineResult, TranslationOutputPaths
 from translation.qa import QAIssue
-from translation.report import QAStats, TranslationStats, write_translation_report
+from translation.report import AutoSubSegmentationStats, QAStats, TranslationStats, write_translation_report
 
 
 class TranslationReportTests(unittest.TestCase):
@@ -421,6 +421,141 @@ class TranslationReportTests(unittest.TestCase):
         self.assertIn("- QA failures occurred but translation-stage output was preserved.", report)
         self.assertIn("- Fallback route used for one or more batches.", report)
         self.assertIn("- Shrink-batch compensation activated for one or more parent batches.", report)
+
+    def test_write_translation_report_omits_auto_sub_section_when_preprocessing_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_paths = TranslationOutputPaths(
+                output_dir=root / "translated",
+                translated_srt=root / "translated" / "translated.zh-CN.srt",
+                bilingual_srt=root / "translated" / "bilingual.srt",
+                translation_report=root / "translated" / "translation_report.md",
+                global_context=root / "translated" / "global_context.md",
+            )
+            result = PipelineResult(
+                input_path=root / "input.en.srt",
+                input_format="srt",
+                output_format="srt",
+                output_paths=output_paths,
+                dry_run=False,
+                cue_count=2,
+                provider_called=True,
+            )
+            config = TranslationConfig(api_key="sk-test", preprocess_auto_subs=False)
+            stats = TranslationStats(total_batches=1, provider_calls=1)
+            glossary = Glossary(path=None, text="", hash="", exists=False, truncated=False)
+            context = GlobalContext(text="", hash="")
+            report_path = root / "translated" / "translation_report.md"
+
+            write_translation_report(report_path, result, config, stats, glossary, context)
+
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("## Auto-sub Segmentation", report)
+        self.assertIn("## Output Artifacts", report)
+
+    def test_write_translation_report_includes_auto_sub_section_and_artifact_links_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_paths = TranslationOutputPaths(
+                output_dir=root / "translated",
+                translated_srt=root / "translated" / "translated.zh-CN.srt",
+                bilingual_srt=root / "translated" / "bilingual.srt",
+                translation_report=root / "translated" / "translation_report.md",
+                global_context=root / "translated" / "global_context.md",
+            )
+            result = PipelineResult(
+                input_path=root / "input.en.vtt",
+                input_format="vtt",
+                output_format="srt",
+                output_paths=output_paths,
+                dry_run=False,
+                cue_count=2,
+                provider_called=True,
+            )
+            config = TranslationConfig(
+                api_key="sk-test",
+                preprocess_auto_subs=True,
+                auto_sub_source_mode="single_file",
+            )
+            stats = TranslationStats(
+                total_batches=1,
+                provider_calls=1,
+                auto_sub_segmentation=AutoSubSegmentationStats(
+                    source_mode="full_vtt_window",
+                    segmentation_strategy_version="rules.v1",
+                    timing_strategy_version="proportional.v1",
+                    original_cue_count=8,
+                    window_cue_count=5,
+                    cleaned_active_token_count=4,
+                    translation_unit_count=3,
+                    translated_segment_unit_count=2,
+                    skipped_padding_only_unit_count=1,
+                    warning_count=2,
+                ),
+            )
+            glossary = Glossary(path=None, text="", hash="", exists=False, truncated=False)
+            context = GlobalContext(text="", hash="")
+            report_path = root / "translated" / "translation_report.md"
+
+            write_translation_report(report_path, result, config, stats, glossary, context)
+
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("## Auto-sub Segmentation", report)
+        self.assertIn("- enabled: true", report)
+        self.assertIn("- source_mode: full_vtt_window", report)
+        self.assertIn("- segmentation_strategy_version: rules.v1", report)
+        self.assertIn("- timing_strategy_version: proportional.v1", report)
+        self.assertIn("- original_cue_count: 8", report)
+        self.assertIn("- window_cue_count: 5", report)
+        self.assertIn("- cleaned_active_token_count: 4", report)
+        self.assertIn("- translation_unit_count: 3", report)
+        self.assertIn("- translated_segment_unit_count: 2", report)
+        self.assertIn("- skipped_padding_only_unit_count: 1", report)
+        self.assertIn("- warning_count: 2", report)
+        self.assertIn("- segmentation_report: segmentation_report.md", report)
+        self.assertIn("- translation_units: translation_units.json", report)
+        self.assertIn("- cue_map: cue_map.json", report)
+        self.assertIn("- segmented_source: segmented_source.srt", report)
+
+
+class TranslationAutoSubDocsTests(unittest.TestCase):
+    def test_env_example_includes_auto_sub_config_keys(self):
+        env_example = Path(__file__).resolve().parent.parent / ".env.example"
+
+        text = env_example.read_text(encoding="utf-8")
+
+        expected_keys = [
+            "TRANSLATION_PREPROCESS_AUTO_SUBS=false",
+            "TRANSLATION_AUTO_SUB_SOURCE_MODE=single_file",
+            "TRANSLATION_AUTO_SUB_FULL_VTT_PATH=",
+            "TRANSLATION_AUTO_SUB_CLIP_START_MS=",
+            "TRANSLATION_AUTO_SUB_CLIP_END_MS=",
+            "TRANSLATION_AUTO_SUB_PADDING_BEFORE_MS=10000",
+            "TRANSLATION_AUTO_SUB_PADDING_AFTER_MS=10000",
+            "TRANSLATION_SEGMENT_MAX_UNIT_CHARS=180",
+            "TRANSLATION_SEGMENT_MAX_UNIT_DURATION_MS=7000",
+            "TRANSLATION_SEGMENT_MAX_SOURCE_CUES=5",
+            "TRANSLATION_SEGMENT_MAX_SENTENCES=2",
+        ]
+        for key in expected_keys:
+            self.assertIn(key, text)
+
+    def test_docs_mention_default_off_and_cache_identity_behavior(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        skill = (repo_root / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("default is off", readme)
+        self.assertIn("single_file is degraded fallback", readme)
+        self.assertIn("full_vtt_window is recommended mode", readme)
+        self.assertIn("batch_source_hash", readme)
+        self.assertIn("translation_report.md", skill)
+        self.assertIn("segmented_source.srt", skill)
+        self.assertIn("translation_units.json", skill)
+        self.assertIn("cue_map.json", skill)
+        self.assertIn("segmentation_report.md", skill)
 
 
 if __name__ == "__main__":

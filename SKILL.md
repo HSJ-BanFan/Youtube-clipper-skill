@@ -211,7 +211,9 @@ python3 scripts/translate_subtitles_v2.py \
 - 输出: `$CLIP_DIR/bilingual.srt`
 - 报告: `$CLIP_DIR/translation_report.md`
 - 全局上下文: `$CLIP_DIR/global_context.md`
-- **Release pass 检查**: 查看 `translation_report.md` 中 `Run Summary` 里的 `final_status`，以及 `Warnings`、`Provider / Fallback Summary`、`Concurrency Summary`、`QA Summary`
+- 若启用 auto-sub preprocessing，还会写出：`$CLIP_DIR/segmented_source.srt`、`$CLIP_DIR/translation_units.json`、`$CLIP_DIR/cue_map.json`、`$CLIP_DIR/segmentation_report.md`
+- `translation_report.md` 在 preprocessing 启用时必须链接这些 segmentation artifacts
+- **Release pass 检查**: 查看 `translation_report.md` 中 `Run Summary` 里的 `final_status`，以及 `Warnings`、`Provider / Fallback Summary`、`Concurrency Summary`、`QA Summary`、`Auto-sub Segmentation`
 
 #### 5.4 双语字幕文件（如果用户选择）
 - 由 `translate_subtitles_v2.py --output "$CLIP_DIR/bilingual.srt"` 生成
@@ -321,7 +323,21 @@ python3 scripts/generate_summary.py <chapter_info>
 - 提高翻译速度
 - 保持翻译一致性
 
-### 3. 章节分析精细度
+### 3. Auto-sub preprocessing 使用边界
+**默认**: 关闭。只建议用于 YouTube auto-generated subtitles。手动字幕通常不要开。
+
+**模式**:
+- `single_file`: degraded fallback
+- `full_vtt_window`: recommended mode
+
+**规则**:
+- raw full VTT 应尽量保留
+- `clip_start_ms` / `clip_end_ms` 使用原视频绝对时间毫秒
+- padding 只用于 segmentation context
+- `padding_only` units 不进入最终 translated/bilingual 输出
+- segmented and non-segmented runs are cache-isolated effectively because translation input identity and `batch_source_hash` both change
+
+### 4. 章节分析精细度
 **目标**: 生成 2-5 分钟粒度的章节，避免半小时粗粒度
 
 **方法**:
