@@ -7,7 +7,7 @@ from translation.models import BatchRecord, Cue, CueRecord, TranslationBatch
 from translation.qa import QACandidate
 
 
-PROMPT_VERSION = "translation-v2-json-cue-v1"
+PROMPT_VERSION = "translation-v2-json-cue-v2"
 QA_PROMPT_VERSION = "translation-v2-suspicious-qa-v2"
 
 
@@ -26,9 +26,14 @@ def build_translation_prompt(
             "Each item must have id and translation fields.",
             "id must match exactly. translation must not be empty.",
             "preserve code, commands, variable names, paths, URLs, and library names.",
+            "Each output item must translate only that item's source cue text.",
+            "Do not move source content between ids.",
+            "Do not translate adjacent cue content into the current cue.",
+            "If a source cue is a fragment, preserve it as a fragment; do not complete it with neighboring cues.",
+            "Do not make the translation more complete by borrowing from neighboring cues.",
             "Follow the glossary consistently when translating current cues.",
-            "Global context is only for understanding; do not translate global context or output it.",
-            "Before/after context is only for understanding; do not translate context or include context ids in output.",
+            "Global context is only for disambiguation, not a content source; do not translate global context or output it.",
+            "Before/after context is only for disambiguation, not a content source; do not translate context or include context ids in output.",
             "Expected JSON shape:",
             '[{"id": "1", "translation": "..."}]',
             "Glossary:",
@@ -64,9 +69,14 @@ def build_structured_translation_prompt(
             "Each item must have cue_id and translation fields.",
             "cue_id must match exactly. translation must not be empty.",
             "preserve code, commands, variable names, paths, URLs, and library names.",
+            "Each output item must translate only that item's source cue text.",
+            "Do not move source content between cue_ids.",
+            "Do not translate adjacent cue content into the current cue.",
+            "If a source cue is a fragment, preserve it as a fragment; do not complete it with neighboring cues.",
+            "Do not make the translation more complete by borrowing from neighboring cues.",
             "Follow the glossary consistently when translating current cues.",
-            "Global context is only for understanding; do not translate global context or output it.",
-            "Before/after context is only for understanding; do not translate context or include context ids in output.",
+            "Global context is only for disambiguation, not a content source; do not translate global context or output it.",
+            "Before/after context is only for disambiguation, not a content source; do not translate context or include context ids in output.",
             "Expected JSON shape:",
             '[{"cue_id": "1", "translation": "..."}]',
             "Glossary:",
