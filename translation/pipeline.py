@@ -26,8 +26,10 @@ from translation.prompts import (
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
 from translation.qa import QACandidate, find_suspicious_translations
 from translation.report import QAStats, TranslationStats, write_translation_report
+from translation.segmentation import SegmentBoundaryType, SegmentationOptions, SegmentationResult, SegmentUnit, SubtitleSegmentationSource, segment_subtitles
 from translation.subtitles import (
     detect_subtitle_format,
+    format_timestamp,
     parse_subtitle_file,
     validate_translations,
     write_bilingual_srt,
@@ -49,6 +51,13 @@ class BatchExecutionResult:
     translations: tuple[tuple[str, str], ...]
     stats_delta: BatchStatsDelta
     batch_entry: MinimalBatchReportEntry
+
+
+@dataclass(frozen=True)
+class PreparedTranslationInputs:
+    cues: tuple[Cue, ...]
+    segmentation_result: SegmentationResult | None = None
+    segmentation_metadata_by_cue_id: dict[str, dict[str, object]] | None = None
 
 
 class BatchExecutionFailed(RuntimeError):
@@ -145,8 +154,9 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
 
     input_format = detect_subtitle_format(input_path)
     output_paths = build_output_paths(input_path, config)
-    _ensure_outputs_do_not_exist(output_paths, config.overwrite)
-    cues = parse_subtitle_file(input_path)
+    _ensure_outputs_do_not_exist(output_paths, config.overwrite, include_segmentation_artifacts=config.preprocess_auto_subs)
+    prepared_inputs = _prepare_translation_inputs(input_path, config)
+    cues = list(prepared_inputs.cues)
 
     if config.dry_run:
         return PipelineResult(
@@ -187,6 +197,8 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     validate_translations(cues, final_translations)
     write_translated_srt(cues, final_translations, output_paths.translated_srt)
     write_bilingual_srt(cues, final_translations, output_paths.bilingual_srt)
+    if prepared_inputs.segmentation_result is not None:
+        _write_segmentation_artifacts(prepared_inputs.segmentation_result, output_paths.output_dir)
     write_global_context(global_context, output_paths.global_context)
 
     result = PipelineResult(
@@ -202,6 +214,111 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     )
     write_translation_report(output_paths.translation_report, result, config, stats, glossary, global_context)
     return result
+
+
+def _prepare_translation_inputs(input_path: Path, config: TranslationConfig) -> PreparedTranslationInputs:
+    if not config.preprocess_auto_subs:
+        return PreparedTranslationInputs(cues=tuple(parse_subtitle_file(input_path)))
+
+    segmentation_source = _build_segmentation_source(input_path, config)
+    segmentation_options = SegmentationOptions(
+        max_unit_chars=config.segment_max_unit_chars,
+        max_unit_duration_ms=config.segment_max_unit_duration_ms,
+        max_source_cues=config.segment_max_source_cues,
+        max_sentences=config.segment_max_sentences,
+    )
+    segmentation_result = segment_subtitles(segmentation_source, segmentation_options)
+    eligible_units = tuple(unit for unit in segmentation_result.units if _is_translation_eligible(unit))
+    if not eligible_units:
+        raise ValueError("segmentation produced no eligible translation units")
+    cues = tuple(_segment_unit_to_cue(unit, index) for index, unit in enumerate(eligible_units, start=1))
+    segmentation_metadata_by_cue_id = {
+        cue.id: {
+            "source_spans": unit.source_spans,
+            "source_cue_ids": unit.source_cue_ids,
+            "boundary_type": unit.boundary_type.value,
+            "is_padding_only": unit.is_padding_only,
+            "crosses_clip_start": unit.crosses_clip_start,
+            "crosses_clip_end": unit.crosses_clip_end,
+            "intersects_clip": unit.intersects_clip,
+        }
+        for cue, unit in zip(cues, eligible_units, strict=True)
+    }
+    return PreparedTranslationInputs(
+        cues=cues,
+        segmentation_result=segmentation_result,
+        segmentation_metadata_by_cue_id=segmentation_metadata_by_cue_id,
+    )
+
+
+
+def _build_segmentation_source(input_path: Path, config: TranslationConfig) -> SubtitleSegmentationSource:
+    if config.auto_sub_source_mode == "full_vtt_window":
+        return SubtitleSegmentationSource(
+            mode="full_vtt_window",
+            full_vtt_path=Path(config.auto_sub_full_vtt_path) if config.auto_sub_full_vtt_path else None,
+            clip_start_ms=config.auto_sub_clip_start_ms,
+            clip_end_ms=config.auto_sub_clip_end_ms,
+            padding_before_ms=config.auto_sub_padding_before_ms,
+            padding_after_ms=config.auto_sub_padding_after_ms,
+        )
+    return SubtitleSegmentationSource(
+        mode="single_file",
+        subtitle_path=input_path,
+        padding_before_ms=config.auto_sub_padding_before_ms,
+        padding_after_ms=config.auto_sub_padding_after_ms,
+    )
+
+
+
+def _is_translation_eligible(unit: SegmentUnit) -> bool:
+    if unit.boundary_type == SegmentBoundaryType.PADDING_ONLY:
+        return False
+    if unit.boundary_type == SegmentBoundaryType.INSIDE_CLIP:
+        return True
+    if unit.boundary_type in {SegmentBoundaryType.CROSSES_CLIP_START, SegmentBoundaryType.CROSSES_CLIP_END}:
+        return unit.intersects_clip
+    return False
+
+
+
+def _segment_unit_to_cue(unit: SegmentUnit, index: int) -> Cue:
+    start = format_timestamp(unit.start_ms / 1000)
+    end = format_timestamp(unit.end_ms / 1000)
+    return Cue(
+        id=unit.unit_id,
+        index=index,
+        start=start,
+        end=end,
+        source=unit.source_text,
+        raw_timing=f"{start} --> {end}",
+    )
+
+
+
+def _write_segmentation_artifacts(segmentation_result: SegmentationResult, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "segmented_source.srt").write_text(segmentation_result.to_segmented_srt_text(), encoding="utf-8")
+    (output_dir / "translation_units.json").write_text(
+        json.dumps(segmentation_result.to_translation_units_payload(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "cue_map.json").write_text(
+        json.dumps(segmentation_result.to_cue_map_payload(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "segmentation_report.md").write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
+
+
+
+def _segmentation_artifact_paths(output_dir: Path) -> list[Path]:
+    return [
+        output_dir / "segmented_source.srt",
+        output_dir / "translation_units.json",
+        output_dir / "cue_map.json",
+        output_dir / "segmentation_report.md",
+    ]
+
 
 
 def _run_translation_batches(
@@ -1072,10 +1189,16 @@ def _strip_json_fence(response_text: str) -> str:
     return stripped
 
 
-def _ensure_outputs_do_not_exist(paths: TranslationOutputPaths, overwrite: bool) -> None:
+def _ensure_outputs_do_not_exist(
+    paths: TranslationOutputPaths,
+    overwrite: bool,
+    include_segmentation_artifacts: bool = False,
+) -> None:
     if overwrite:
         return
     candidates = [paths.translated_srt, paths.bilingual_srt, paths.translation_report, paths.global_context]
+    if include_segmentation_artifacts:
+        candidates.extend(_segmentation_artifact_paths(paths.output_dir))
     existing = [path for path in candidates if path.exists()]
     if existing:
         joined = ", ".join(str(path) for path in existing)

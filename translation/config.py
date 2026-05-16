@@ -12,6 +12,7 @@ VALID_ENGINE_VERSIONS = {"v1", "v2"}
 VALID_FAILURE_MODES = {"strict", "partial", "interactive"}
 VALID_OUTPUT_SCHEMA_VERSIONS = {"v1"}
 VALID_BATCHING_STRATEGY_VERSIONS = {"v1"}
+VALID_AUTO_SUB_SOURCE_MODES = {"single_file", "full_vtt_window"}
 TARGET_LANG_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
@@ -47,6 +48,17 @@ ENV_MAPPING = {
     "adaptive_concurrency_max": "TRANSLATION_ADAPTIVE_CONCURRENCY_MAX",
     "output_schema_version": "TRANSLATION_OUTPUT_SCHEMA_VERSION",
     "batching_strategy_version": "TRANSLATION_BATCHING_STRATEGY_VERSION",
+    "preprocess_auto_subs": "TRANSLATION_PREPROCESS_AUTO_SUBS",
+    "auto_sub_source_mode": "TRANSLATION_AUTO_SUB_SOURCE_MODE",
+    "auto_sub_full_vtt_path": "TRANSLATION_AUTO_SUB_FULL_VTT_PATH",
+    "auto_sub_clip_start_ms": "TRANSLATION_AUTO_SUB_CLIP_START_MS",
+    "auto_sub_clip_end_ms": "TRANSLATION_AUTO_SUB_CLIP_END_MS",
+    "auto_sub_padding_before_ms": "TRANSLATION_AUTO_SUB_PADDING_BEFORE_MS",
+    "auto_sub_padding_after_ms": "TRANSLATION_AUTO_SUB_PADDING_AFTER_MS",
+    "segment_max_unit_chars": "TRANSLATION_SEGMENT_MAX_UNIT_CHARS",
+    "segment_max_unit_duration_ms": "TRANSLATION_SEGMENT_MAX_UNIT_DURATION_MS",
+    "segment_max_source_cues": "TRANSLATION_SEGMENT_MAX_SOURCE_CUES",
+    "segment_max_sentences": "TRANSLATION_SEGMENT_MAX_SENTENCES",
 }
 
 
@@ -83,6 +95,17 @@ class TranslationConfig:
     adaptive_concurrency_max: int | None = None
     output_schema_version: str = "v1"
     batching_strategy_version: str = "v1"
+    preprocess_auto_subs: bool = False
+    auto_sub_source_mode: str = "single_file"
+    auto_sub_full_vtt_path: str | None = None
+    auto_sub_clip_start_ms: int | None = None
+    auto_sub_clip_end_ms: int | None = None
+    auto_sub_padding_before_ms: int = 10_000
+    auto_sub_padding_after_ms: int = 10_000
+    segment_max_unit_chars: int = 180
+    segment_max_unit_duration_ms: int = 7_000
+    segment_max_source_cues: int = 5
+    segment_max_sentences: int = 2
     output_dir: str | None = None
     output_path: str | None = None
     dry_run: bool = False
@@ -140,6 +163,36 @@ class TranslationConfig:
         if self.batching_strategy_version not in VALID_BATCHING_STRATEGY_VERSIONS:
             valid_batching_strategy_versions = ", ".join(sorted(VALID_BATCHING_STRATEGY_VERSIONS))
             raise ValueError(f"batching_strategy_version must be one of: {valid_batching_strategy_versions}")
+        if self.auto_sub_source_mode not in VALID_AUTO_SUB_SOURCE_MODES:
+            valid_auto_sub_source_modes = ", ".join(sorted(VALID_AUTO_SUB_SOURCE_MODES))
+            raise ValueError(f"auto_sub_source_mode must be one of: {valid_auto_sub_source_modes}")
+        if not isinstance(self.preprocess_auto_subs, bool):
+            raise ValueError("preprocess_auto_subs must be a boolean")
+        if self.auto_sub_padding_before_ms < 0:
+            raise ValueError("auto_sub_padding_before_ms must be greater than or equal to 0")
+        if self.auto_sub_padding_after_ms < 0:
+            raise ValueError("auto_sub_padding_after_ms must be greater than or equal to 0")
+        if self.segment_max_unit_chars <= 0:
+            raise ValueError("segment_max_unit_chars must be greater than 0")
+        if self.segment_max_unit_duration_ms <= 0:
+            raise ValueError("segment_max_unit_duration_ms must be greater than 0")
+        if self.segment_max_source_cues <= 0:
+            raise ValueError("segment_max_source_cues must be greater than 0")
+        if self.segment_max_sentences <= 0:
+            raise ValueError("segment_max_sentences must be greater than 0")
+        if (
+            self.auto_sub_clip_start_ms is not None
+            and self.auto_sub_clip_end_ms is not None
+            and self.auto_sub_clip_start_ms >= self.auto_sub_clip_end_ms
+        ):
+            raise ValueError("auto_sub_clip_start_ms must be before auto_sub_clip_end_ms")
+        if self.preprocess_auto_subs and self.auto_sub_source_mode == "full_vtt_window":
+            if not self.auto_sub_full_vtt_path:
+                raise ValueError("auto_sub_full_vtt_path is required for full_vtt_window")
+            if self.auto_sub_clip_start_ms is None:
+                raise ValueError("auto_sub_clip_start_ms is required for full_vtt_window")
+            if self.auto_sub_clip_end_ms is None:
+                raise ValueError("auto_sub_clip_end_ms is required for full_vtt_window")
         if self.output_dir and self.output_path:
             raise ValueError("output_dir and output_path cannot both be set")
 
@@ -185,6 +238,17 @@ class TranslationConfig:
             "adaptive_concurrency_max": self.adaptive_concurrency_max,
             "output_schema_version": self.output_schema_version,
             "batching_strategy_version": self.batching_strategy_version,
+            "preprocess_auto_subs": self.preprocess_auto_subs,
+            "auto_sub_source_mode": self.auto_sub_source_mode,
+            "auto_sub_full_vtt_path": self.auto_sub_full_vtt_path,
+            "auto_sub_clip_start_ms": self.auto_sub_clip_start_ms,
+            "auto_sub_clip_end_ms": self.auto_sub_clip_end_ms,
+            "auto_sub_padding_before_ms": self.auto_sub_padding_before_ms,
+            "auto_sub_padding_after_ms": self.auto_sub_padding_after_ms,
+            "segment_max_unit_chars": self.segment_max_unit_chars,
+            "segment_max_unit_duration_ms": self.segment_max_unit_duration_ms,
+            "segment_max_source_cues": self.segment_max_source_cues,
+            "segment_max_sentences": self.segment_max_sentences,
             "output_dir": self.output_dir,
             "output_path": self.output_path,
             "dry_run": self.dry_run,
@@ -254,11 +318,19 @@ def _coerce_value(field_name: str, raw_value: str) -> Any:
             "concurrency",
             "adaptive_concurrency_min",
             "adaptive_concurrency_max",
+            "auto_sub_clip_start_ms",
+            "auto_sub_clip_end_ms",
+            "auto_sub_padding_before_ms",
+            "auto_sub_padding_after_ms",
+            "segment_max_unit_chars",
+            "segment_max_unit_duration_ms",
+            "segment_max_source_cues",
+            "segment_max_sentences",
         }:
             return int(raw_value)
         if field_name == "temperature":
             return float(raw_value)
-        if field_name in {"cache_enabled", "structured_output", "adaptive_concurrency_enabled"}:
+        if field_name in {"cache_enabled", "structured_output", "adaptive_concurrency_enabled", "preprocess_auto_subs"}:
             return _parse_bool(raw_value)
     except ValueError as exc:
         env_name = ENV_MAPPING.get(field_name, field_name)
