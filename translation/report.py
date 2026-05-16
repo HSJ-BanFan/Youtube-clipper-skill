@@ -7,7 +7,14 @@ from typing import Any, Sequence
 from translation.config import TranslationConfig
 from translation.context import GlobalContext
 from translation.glossary import Glossary
-from translation.models import MinimalBatchReportEntry, PipelineResult
+from translation.models import (
+    SEGMENTATION_ARTIFACT_CUE_MAP,
+    SEGMENTATION_ARTIFACT_REPORT,
+    SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE,
+    SEGMENTATION_ARTIFACT_TRANSLATION_UNITS,
+    MinimalBatchReportEntry,
+    PipelineResult,
+)
 from translation.qa import QAIssue
 
 REPORT_SCHEMA_VERSION = "translation-v2-report-v2"
@@ -155,10 +162,10 @@ def _auto_sub_segmentation_entries(stats: AutoSubSegmentationStats) -> list[str]
         f"- translated_segment_unit_count: {stats.translated_segment_unit_count}",
         f"- skipped_padding_only_unit_count: {stats.skipped_padding_only_unit_count}",
         f"- warning_count: {stats.warning_count}",
-        "- segmentation_report: segmentation_report.md",
-        "- translation_units: translation_units.json",
-        "- cue_map: cue_map.json",
-        "- segmented_source: segmented_source.srt",
+        f"- segmentation_report: {SEGMENTATION_ARTIFACT_REPORT}",
+        f"- translation_units: {SEGMENTATION_ARTIFACT_TRANSLATION_UNITS}",
+        f"- cue_map: {SEGMENTATION_ARTIFACT_CUE_MAP}",
+        f"- segmented_source: {SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE}",
     ]
 
 

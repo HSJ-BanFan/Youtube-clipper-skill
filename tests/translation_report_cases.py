@@ -539,6 +539,7 @@ class TranslationAutoSubDocsTests(unittest.TestCase):
             "TRANSLATION_SEGMENT_MAX_SOURCE_CUES=5",
             "TRANSLATION_SEGMENT_MAX_SENTENCES=2",
         ]
+        self.assertEqual(len(expected_keys), 11)
         for key in expected_keys:
             self.assertIn(key, text)
 

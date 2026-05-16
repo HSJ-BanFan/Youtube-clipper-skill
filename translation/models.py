@@ -33,6 +33,12 @@ class TranslationBatch:
     context_after: tuple[Cue, ...]
 
 
+SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE = "segmented_source.srt"
+SEGMENTATION_ARTIFACT_TRANSLATION_UNITS = "translation_units.json"
+SEGMENTATION_ARTIFACT_CUE_MAP = "cue_map.json"
+SEGMENTATION_ARTIFACT_REPORT = "segmentation_report.md"
+
+
 @dataclass(frozen=True)
 class TranslationOutputPaths:
     output_dir: Path

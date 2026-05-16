@@ -15,7 +15,7 @@ from translation.cache import CacheEntry, TranslationCache, build_batch_cache_ke
 from translation.config import TranslationConfig
 from translation.context import build_global_context, write_global_context
 from translation.glossary import load_glossary
-from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorType, MinimalBatchReportEntry, PipelineResult, TranslationBatch, TranslationOutputPaths
+from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorType, MinimalBatchReportEntry, PipelineResult, SEGMENTATION_ARTIFACT_CUE_MAP, SEGMENTATION_ARTIFACT_REPORT, SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE, SEGMENTATION_ARTIFACT_TRANSLATION_UNITS, TranslationBatch, TranslationOutputPaths
 from translation.prompts import (
     QA_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -322,25 +322,25 @@ def _build_auto_sub_segmentation_stats(
 
 def _write_segmentation_artifacts(segmentation_result: SegmentationResult, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "segmented_source.srt").write_text(segmentation_result.to_segmented_srt_text(), encoding="utf-8")
-    (output_dir / "translation_units.json").write_text(
+    (output_dir / SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE).write_text(segmentation_result.to_segmented_srt_text(), encoding="utf-8")
+    (output_dir / SEGMENTATION_ARTIFACT_TRANSLATION_UNITS).write_text(
         json.dumps(segmentation_result.to_translation_units_payload(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (output_dir / "cue_map.json").write_text(
+    (output_dir / SEGMENTATION_ARTIFACT_CUE_MAP).write_text(
         json.dumps(segmentation_result.to_cue_map_payload(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (output_dir / "segmentation_report.md").write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
+    (output_dir / SEGMENTATION_ARTIFACT_REPORT).write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
 
 
 
 def _segmentation_artifact_paths(output_dir: Path) -> list[Path]:
     return [
-        output_dir / "segmented_source.srt",
-        output_dir / "translation_units.json",
-        output_dir / "cue_map.json",
-        output_dir / "segmentation_report.md",
+        output_dir / SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE,
+        output_dir / SEGMENTATION_ARTIFACT_TRANSLATION_UNITS,
+        output_dir / SEGMENTATION_ARTIFACT_CUE_MAP,
+        output_dir / SEGMENTATION_ARTIFACT_REPORT,
     ]
 
 
