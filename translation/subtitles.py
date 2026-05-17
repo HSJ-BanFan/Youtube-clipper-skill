@@ -73,6 +73,8 @@ def parse_vtt(content: str) -> list[Cue]:
     lines = _normalize_lines(content)
     if lines and lines[0].lstrip("﻿").startswith("WEBVTT"):
         lines = lines[1:]
+    lines = _strip_vtt_header_metadata(lines)
+    lines = _collapse_blank_after_timing(lines)
     cues = _parse_blocks("\n".join(lines), is_vtt=True)
     validate_cues(cues)
     return cues
@@ -191,6 +193,8 @@ def _parse_blocks(content: str, is_vtt: bool) -> list[Cue]:
         if cue is None:
             snippet = _format_block_snippet(block)
             raise ValueError(f"invalid subtitle cue block near cue index {len(cues) + 1}: {snippet}")
+        if is_vtt and not cue.source.strip():
+            continue
         cues.append(cue)
     return cues
 
@@ -213,6 +217,56 @@ def _split_blocks(content: str) -> list[list[str]]:
 
 def _normalize_lines(content: str) -> list[str]:
     return content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+_VTT_HEADER_METADATA_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*\s*:")
+
+
+def _strip_vtt_header_metadata(lines: list[str]) -> list[str]:
+    """Drop VTT header metadata lines (Kind:, Language:, etc.) before the first cue.
+
+    Per the WebVTT spec, the optional header section after WEBVTT contains key:value
+    metadata terminated by a blank line. YouTube auto-sub VTT always emits Kind:
+    and Language: which the cue parser cannot interpret.
+    """
+    result: list[str] = []
+    in_header = True
+    for line in lines:
+        if in_header:
+            stripped = line.strip()
+            if stripped == "":
+                in_header = False
+                result.append(line)
+                continue
+            if _TIMING_RE.match(stripped):
+                in_header = False
+                result.append(line)
+                continue
+            if _VTT_HEADER_METADATA_RE.match(stripped):
+                continue
+            in_header = False
+            result.append(line)
+            continue
+        result.append(line)
+    return result
+
+
+def _collapse_blank_after_timing(lines: list[str]) -> list[str]:
+    """Drop the single placeholder blank line that follows a VTT timing line.
+
+    YouTube auto-sub VTT places exactly one blank/space-only line between the
+    timing line and the cue body. We only collapse the first such blank so that
+    any subsequent blank line still acts as a normal cue separator.
+    """
+    result: list[str] = []
+    just_saw_timing = False
+    for line in lines:
+        if just_saw_timing and line.strip() == "":
+            just_saw_timing = False
+            continue
+        result.append(line)
+        just_saw_timing = bool(_TIMING_RE.match(line.strip()))
+    return result
 
 
 def _format_block_snippet(block: list[str]) -> str:
