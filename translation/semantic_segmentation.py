@@ -85,10 +85,17 @@ def parse_semantic_boundaries(payload: str | dict[str, Any]) -> tuple[SemanticBo
             raise SemanticSegmentationError("parse_error: segment entry is not an object")
         if "start_token" not in seg or "end_token" not in seg:
             raise SemanticSegmentationError("parse_error: segment missing start_token or end_token")
+        try:
+            start_token = int(seg["start_token"])
+            end_token = int(seg["end_token"])
+        except (TypeError, ValueError) as exc:
+            raise SemanticSegmentationError(
+                f"parse_error: invalid start_token/end_token value in segment {seg}"
+            ) from exc
         boundaries.append(
             SemanticBoundary(
-                start_token=int(seg["start_token"]),
-                end_token=int(seg["end_token"]),
+                start_token=start_token,
+                end_token=end_token,
                 reason=seg.get("reason"),
             )
         )
@@ -133,19 +140,13 @@ def validate_semantic_boundaries(
         return ValidationResult(ok=False, segments=None, reason=f"V7: last segment end_token != {n}", warnings=())
 
     for i in range(len(boundaries) - 1):
-        if boundaries[i].end_token != boundaries[i + 1].start_token:
-            return ValidationResult(ok=False, segments=None, reason=f"V8: non-contiguous at segment {i}/{i+1}", warnings=())
-
-    for i in range(len(boundaries) - 1):
         if boundaries[i].end_token > boundaries[i + 1].start_token:
             return ValidationResult(ok=False, segments=None, reason=f"V9: overlap at segment {i}/{i+1}", warnings=())
-
-    for i in range(len(boundaries) - 1):
         if boundaries[i].end_token < boundaries[i + 1].start_token:
             return ValidationResult(ok=False, segments=None, reason=f"V10: gap at segment {i}/{i+1}", warnings=())
 
-    hard_max_chars = int(options.max_unit_chars * 1.5)
-    hard_max_duration = int(options.max_unit_duration_ms * 1.5)
+    hard_max_chars = int(options.max_unit_chars * SEMANTIC_HARD_LIMIT_MULTIPLIER)
+    hard_max_duration = int(options.max_unit_duration_ms * SEMANTIC_HARD_LIMIT_MULTIPLIER)
 
     for i, b in enumerate(boundaries):
         seg_tokens = eligible_tokens[b.start_token:b.end_token]
@@ -175,33 +176,38 @@ def _derive_source_spans_from_token_range(
     eligible_tokens: tuple[SourceToken, ...],
     start_token: int,
     end_token: int,
-    global_offset: int = 0,
+    original_indices: tuple[int, ...] | None = None,
 ) -> tuple[SourceSpan, ...]:
     tokens = eligible_tokens[start_token:end_token]
     if not tokens:
         return ()
 
+    if original_indices is not None:
+        idx_slice = original_indices[start_token:end_token]
+    else:
+        idx_slice = tuple(range(start_token, end_token))
+
     spans: list[SourceSpan] = []
     current_cue_id = tokens[0].cue_id
-    current_start = global_offset + start_token
+    current_start_orig = idx_slice[0]
     cue_token_start = tokens[0].token_index_in_cue
 
-    for idx, token in enumerate(tokens):
+    for i, token in enumerate(tokens):
         if token.cue_id != current_cue_id:
             spans.append(SourceSpan(
-                start=current_start,
-                end=global_offset + start_token + idx,
+                start=current_start_orig,
+                end=idx_slice[i],
                 cue_id=current_cue_id,
                 cue_token_start=cue_token_start,
-                cue_token_end=tokens[idx - 1].token_index_in_cue + 1,
+                cue_token_end=tokens[i - 1].token_index_in_cue + 1,
             ))
             current_cue_id = token.cue_id
-            current_start = global_offset + start_token + idx
+            current_start_orig = idx_slice[i]
             cue_token_start = token.token_index_in_cue
 
     spans.append(SourceSpan(
-        start=current_start,
-        end=global_offset + end_token,
+        start=current_start_orig,
+        end=idx_slice[-1] + 1,
         cue_id=current_cue_id,
         cue_token_start=cue_token_start,
         cue_token_end=tokens[-1].token_index_in_cue + 1,
@@ -215,6 +221,7 @@ def rebuild_units_from_boundaries(
     preserved_padding_units: tuple[SegmentUnit, ...],
     clip_start_ms: int | None,
     clip_end_ms: int | None,
+    original_indices: tuple[int, ...] | None = None,
 ) -> tuple[SegmentUnit, ...]:
     units: list[SegmentUnit] = []
 
@@ -224,7 +231,9 @@ def rebuild_units_from_boundaries(
         start_ms = seg_tokens[0].start_ms
         end_ms = seg_tokens[-1].end_ms
 
-        source_spans = _derive_source_spans_from_token_range(eligible_tokens, b.start_token, b.end_token)
+        source_spans = _derive_source_spans_from_token_range(
+            eligible_tokens, b.start_token, b.end_token, original_indices=original_indices
+        )
 
         boundary_type, is_padding_only, crosses_clip_start, crosses_clip_end, intersects_clip = _unit_boundary(
             list(seg_tokens), clip_start_ms, clip_end_ms
@@ -243,13 +252,23 @@ def rebuild_units_from_boundaries(
             intersects_clip=intersects_clip,
         ))
 
-    return tuple(units) + preserved_padding_units
+    combined = list(units) + list(preserved_padding_units)
+    combined.sort(key=lambda u: (u.start_ms, u.end_ms, u.unit_id))
+    return tuple(combined)
 
 
 def extract_translation_eligible_tokens(
     active_tokens: tuple[SourceToken, ...],
     rule_units: tuple[SegmentUnit, ...],
 ) -> tuple[SourceToken, ...]:
+    eligible, _ = _extract_eligible_with_indices(active_tokens, rule_units)
+    return eligible
+
+
+def _extract_eligible_with_indices(
+    active_tokens: tuple[SourceToken, ...],
+    rule_units: tuple[SegmentUnit, ...],
+) -> tuple[tuple[SourceToken, ...], tuple[int, ...]]:
     padding_only_token_ids: set[int] = set()
     for unit in rule_units:
         if unit.is_padding_only:
@@ -257,10 +276,13 @@ def extract_translation_eligible_tokens(
                 for pos in range(span.start, span.end):
                     padding_only_token_ids.add(pos)
 
-    return tuple(
-        token for idx, token in enumerate(active_tokens)
-        if idx not in padding_only_token_ids
-    )
+    tokens: list[SourceToken] = []
+    indices: list[int] = []
+    for idx, token in enumerate(active_tokens):
+        if idx not in padding_only_token_ids:
+            tokens.append(token)
+            indices.append(idx)
+    return tuple(tokens), tuple(indices)
 
 
 def extract_padding_only_units(rule_units: tuple[SegmentUnit, ...]) -> tuple[SegmentUnit, ...]:
@@ -288,12 +310,12 @@ def fallback_to_rule_units(
 def refine_units_from_semantic_boundaries(
     active_tokens: tuple[SourceToken, ...],
     rule_units: tuple[SegmentUnit, ...],
-    raw_payload: str | dict,
+    raw_payload: str | dict[str, Any],
     options: SemanticSegmenterOptions,
     clip_start_ms: int | None,
     clip_end_ms: int | None,
 ) -> SemanticSegmentationResult:
-    eligible_tokens = extract_translation_eligible_tokens(active_tokens, rule_units)
+    eligible_tokens, original_indices = _extract_eligible_with_indices(active_tokens, rule_units)
 
     if len(eligible_tokens) > options.max_tokens_per_request:
         if options.fallback_to_rules:
@@ -333,6 +355,7 @@ def refine_units_from_semantic_boundaries(
         preserved_padding_units=preserved_padding,
         clip_start_ms=clip_start_ms,
         clip_end_ms=clip_end_ms,
+        original_indices=original_indices,
     )
 
     return SemanticSegmentationResult(

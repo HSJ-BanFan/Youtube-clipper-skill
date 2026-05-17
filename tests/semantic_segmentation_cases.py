@@ -114,6 +114,16 @@ class ParseSemanticBoundariesTests(unittest.TestCase):
         with self.assertRaises(SemanticSegmentationError):
             parse_semantic_boundaries({"segments": "nope"})
 
+    def test_invalid_start_token_value_raises_parse_error(self):
+        with self.assertRaises(SemanticSegmentationError) as ctx:
+            parse_semantic_boundaries({"segments": [{"start_token": "abc", "end_token": 1}]})
+        self.assertIn("parse_error", str(ctx.exception))
+
+    def test_invalid_end_token_value_raises_parse_error(self):
+        with self.assertRaises(SemanticSegmentationError) as ctx:
+            parse_semantic_boundaries({"segments": [{"start_token": 0, "end_token": None}]})
+        self.assertIn("parse_error", str(ctx.exception))
+
 
 class ValidateSemanticBoundariesTests(unittest.TestCase):
     def setUp(self):
@@ -144,15 +154,17 @@ class ValidateSemanticBoundariesTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("V7", result.reason)
 
-    def test_overlap_fails(self):
+    def test_overlap_fails_with_v9(self):
         boundaries = (SemanticBoundary(0, 6), SemanticBoundary(5, 11))
         result = validate_semantic_boundaries(boundaries, self.tokens, self.options)
         self.assertFalse(result.ok)
+        self.assertIn("V9", result.reason)
 
-    def test_gap_fails(self):
+    def test_gap_fails_with_v10(self):
         boundaries = (SemanticBoundary(0, 4), SemanticBoundary(5, 11))
         result = validate_semantic_boundaries(boundaries, self.tokens, self.options)
         self.assertFalse(result.ok)
+        self.assertIn("V10", result.reason)
 
     def test_out_of_range_fails(self):
         boundaries = (SemanticBoundary(0, 5), SemanticBoundary(5, 99))
@@ -271,6 +283,107 @@ class RebuildUnitsTests(unittest.TestCase):
         self.assertEqual(len(units), 2)
         self.assertIs(units[1], padding)
         self.assertTrue(units[1].is_padding_only)
+
+    def test_padding_units_keep_chronological_order(self):
+        tokens = _eligible_token_stream()
+        leading_padding = SegmentUnit(
+            unit_id="u000",
+            source_text="leading padding",
+            start_ms=-500,
+            end_ms=-100,
+            source_spans=(SourceSpan(start=20, end=22, cue_id="0", cue_token_start=0, cue_token_end=2),),
+            boundary_type=SegmentBoundaryType.PADDING_ONLY,
+            is_padding_only=True,
+            crosses_clip_start=False,
+            crosses_clip_end=False,
+            intersects_clip=False,
+        )
+        boundaries = (SemanticBoundary(0, 11),)
+        units = rebuild_units_from_boundaries(
+            boundaries=boundaries,
+            eligible_tokens=tokens,
+            preserved_padding_units=(leading_padding,),
+            clip_start_ms=0,
+            clip_end_ms=5000,
+        )
+        self.assertEqual([unit.unit_id for unit in units], ["u000", "s001"])
+
+    def test_refine_preserves_original_active_token_indices_in_source_spans(self):
+        active = (
+            _token(0, "0", 0, 0, "pad", -200, -100, intersects_clip=False, is_padding_only=True),
+            _token(1, "1", 1, 0, "alpha", 0, 200),
+            _token(2, "1", 1, 1, "beta", 200, 400),
+            _token(3, "9", 2, 0, "midpad", 400, 500, intersects_clip=False, is_padding_only=True),
+            _token(4, "2", 3, 0, "gamma", 500, 700),
+            _token(5, "2", 3, 1, "delta", 700, 900),
+        )
+        rule_units = (
+            SegmentUnit(
+                unit_id="u000",
+                source_text="pad",
+                start_ms=-200,
+                end_ms=-100,
+                source_spans=(SourceSpan(start=0, end=1, cue_id="0", cue_token_start=0, cue_token_end=1),),
+                boundary_type=SegmentBoundaryType.PADDING_ONLY,
+                is_padding_only=True,
+                crosses_clip_start=False,
+                crosses_clip_end=False,
+                intersects_clip=False,
+            ),
+            SegmentUnit(
+                unit_id="u001",
+                source_text="alpha beta gamma delta",
+                start_ms=0,
+                end_ms=900,
+                source_spans=(
+                    SourceSpan(start=1, end=3, cue_id="1", cue_token_start=0, cue_token_end=2),
+                    SourceSpan(start=4, end=6, cue_id="2", cue_token_start=0, cue_token_end=2),
+                ),
+                boundary_type=SegmentBoundaryType.INSIDE_CLIP,
+                is_padding_only=False,
+                crosses_clip_start=False,
+                crosses_clip_end=False,
+                intersects_clip=True,
+            ),
+            SegmentUnit(
+                unit_id="u002",
+                source_text="midpad",
+                start_ms=400,
+                end_ms=500,
+                source_spans=(SourceSpan(start=3, end=4, cue_id="9", cue_token_start=0, cue_token_end=1),),
+                boundary_type=SegmentBoundaryType.PADDING_ONLY,
+                is_padding_only=True,
+                crosses_clip_start=False,
+                crosses_clip_end=False,
+                intersects_clip=False,
+            ),
+        )
+        payload = {"segments": [{"start_token": 0, "end_token": 4}]}
+        options = SemanticSegmenterOptions(
+            enabled=True,
+            mode="hybrid",
+            max_unit_chars=220,
+            max_unit_duration_ms=9000,
+            min_unit_duration_ms=100,
+            max_tokens_per_request=350,
+            fallback_to_rules=True,
+        )
+        result = refine_units_from_semantic_boundaries(
+            active_tokens=active,
+            rule_units=rule_units,
+            raw_payload=payload,
+            options=options,
+            clip_start_ms=0,
+            clip_end_ms=1000,
+        )
+        semantic_unit = next(unit for unit in result.units if unit.unit_id == "s001")
+        self.assertEqual(
+            semantic_unit.source_spans,
+            (
+                SourceSpan(start=1, end=4, cue_id="1", cue_token_start=0, cue_token_end=2),
+                SourceSpan(start=4, end=6, cue_id="2", cue_token_start=0, cue_token_end=2),
+            ),
+        )
 
     def test_crosses_clip_end_boundary_type(self):
         tokens = _eligible_token_stream()
