@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from typing import Any
 
 from translation.models import BatchRecord, Cue, CueRecord, TranslationBatch
 from translation.qa import QACandidate
@@ -9,6 +10,7 @@ from translation.qa import QACandidate
 
 PROMPT_VERSION = "translation-v2-json-cue-v2"
 QA_PROMPT_VERSION = "translation-v2-suspicious-qa-v2"
+SEMANTIC_SEGMENTATION_PROMPT_VERSION = "cycle3a-semantic-v1"
 
 
 def build_translation_prompt(
@@ -122,6 +124,32 @@ def build_suspicious_qa_prompt(
     )
 
 
+def build_semantic_segmentation_prompt(
+    eligible_tokens: Sequence[Any],
+    options: Any,
+) -> str:
+    return "\n".join(
+        [
+            "Segment subtitle token stream into semantically coherent translation units.",
+            "only return JSON. do not return Markdown or explanations.",
+            "Return JSON object with exactly one key: segments.",
+            'Shape: {"segments": [{"start_token": 0, "end_token": 12, "reason": "brief optional note"}]}.',
+            "Rules:",
+            "- Cover every token exactly once.",
+            "- First segment start_token must be 0.",
+            "- Last segment end_token must equal token count.",
+            "- No gaps. No overlaps.",
+            f"- Target max chars per segment: {options.max_unit_chars}.",
+            f"- Hard max duration goal per segment: {options.max_unit_duration_ms} ms.",
+            f"- Advisory min duration goal per segment: {options.min_unit_duration_ms} ms.",
+            "- Split on natural clause or sentence boundaries when possible.",
+            "- Do not include source text fields, rewritten text, or token arrays in output.",
+            "Eligible token stream:",
+            _format_semantic_tokens(eligible_tokens),
+        ]
+    )
+
+
 def _format_text_section(text: str) -> str:
     stripped = text.strip()
     if not stripped:
@@ -167,6 +195,23 @@ def _format_qa_candidates(candidates: Sequence[QACandidate]) -> str:
                 ],
             }
             for candidate in candidates
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _format_semantic_tokens(tokens: Sequence[Any]) -> str:
+    return json.dumps(
+        [
+            {
+                "token_index": index,
+                "cue_id": token.cue_id,
+                "text": token.text,
+                "start_ms": token.start_ms,
+                "end_ms": token.end_ms,
+            }
+            for index, token in enumerate(tokens)
         ],
         ensure_ascii=False,
         indent=2,

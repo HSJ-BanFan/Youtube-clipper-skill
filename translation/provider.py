@@ -51,6 +51,13 @@ class OpenAICompatibleProvider(TranslationProvider):
         response_data = self._post_chat_completion(prompt, self.review_model)
         return _extract_message_content(response_data)
 
+    def segment_semantically(self, prompt: str, model: str | None = None) -> str:
+        if not self._config.api_key:
+            raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
+
+        response_data = self._post_chat_completion(prompt, model or self.model)
+        return _extract_message_content(response_data)
+
     def _post_chat_completion(self, prompt: str, model: str) -> Any:
         parsed_base_url = urlparse(self.base_url)
         if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:

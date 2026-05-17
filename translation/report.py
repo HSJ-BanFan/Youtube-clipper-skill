@@ -35,6 +35,24 @@ class AutoSubSegmentationStats:
 
 
 @dataclass
+class SemanticSegmentationStats:
+    enabled: bool = False
+    mode: str = "off"
+    prompt_version: str = ""
+    model: str | None = None
+    attempted: bool = False
+    semantic_provider_calls: int = 0
+    semantic_provider_failures: int = 0
+    semantic_fallback_used: bool = False
+    fallback_reason: str | None = None
+    warning_count: int = 0
+    rule_unit_count: int = 0
+    semantic_unit_count: int | None = None
+    final_unit_count: int = 0
+    translated_semantic_unit_count: int | None = None
+
+
+@dataclass
 class QAStats:
     qa_mode: str = "none"
     qa_candidates: int = 0
@@ -68,6 +86,7 @@ class TranslationStats:
     batch_entries: list[MinimalBatchReportEntry] = field(default_factory=list)
     qa: QAStats | None = None
     auto_sub_segmentation: AutoSubSegmentationStats | None = None
+    semantic_segmentation: SemanticSegmentationStats | None = None
 
 
 def write_translation_report(
@@ -102,6 +121,8 @@ def _render_report(
     lines.extend(_render_section("Run Summary", _run_summary_entries(result, stats)))
     if stats.auto_sub_segmentation is not None:
         lines.extend(_render_section("Auto-sub Segmentation", _auto_sub_segmentation_entries(stats.auto_sub_segmentation)))
+    if stats.semantic_segmentation is not None:
+        lines.extend(_render_section("Semantic Segmentation", _semantic_segmentation_entries(stats.semantic_segmentation)))
     lines.extend(_render_section("Config Snapshot", _config_snapshot_entries(safe_config, glossary, context)))
     lines.extend(_render_section("Cache Summary", _cache_summary_entries(safe_config, stats)))
     lines.extend(_render_section("Provider / Fallback Summary", _provider_summary_entries(safe_config, stats)))
@@ -166,6 +187,25 @@ def _auto_sub_segmentation_entries(stats: AutoSubSegmentationStats) -> list[str]
         f"- translation_units: {SEGMENTATION_ARTIFACT_TRANSLATION_UNITS}",
         f"- cue_map: {SEGMENTATION_ARTIFACT_CUE_MAP}",
         f"- segmented_source: {SEGMENTATION_ARTIFACT_SEGMENTED_SOURCE}",
+    ]
+
+
+def _semantic_segmentation_entries(stats: "SemanticSegmentationStats") -> list[str]:
+    return [
+        f"- enabled: {stats.enabled}",
+        f"- mode: {stats.mode}",
+        f"- prompt_version: {stats.prompt_version}",
+        f"- model: {'none' if stats.model is None else stats.model}",
+        f"- attempted: {stats.attempted}",
+        f"- semantic_provider_calls: {stats.semantic_provider_calls}",
+        f"- semantic_provider_failures: {stats.semantic_provider_failures}",
+        f"- semantic_fallback_used: {stats.semantic_fallback_used}",
+        f"- fallback_reason: {'none' if stats.fallback_reason is None else stats.fallback_reason}",
+        f"- warning_count: {stats.warning_count}",
+        f"- rule_unit_count: {stats.rule_unit_count}",
+        f"- semantic_unit_count: {'none' if stats.semantic_unit_count is None else stats.semantic_unit_count}",
+        f"- final_unit_count: {stats.final_unit_count}",
+        f"- translated_semantic_unit_count: {'none' if stats.translated_semantic_unit_count is None else stats.translated_semantic_unit_count}",
     ]
 
 

@@ -434,6 +434,103 @@ class TranslationConfigTests(unittest.TestCase):
                 auto_sub_clip_start_ms=1000,
             )
 
+    def test_semantic_segmentation_defaults(self):
+        config = TranslationConfig()
+
+        self.assertFalse(config.semantic_segmentation_enabled)
+        self.assertEqual(config.semantic_segmentation_mode, "hybrid")
+        self.assertEqual(config.effective_semantic_segmentation_mode, "off")
+        self.assertIsNone(config.semantic_segmentation_model)
+        self.assertEqual(config.semantic_segmentation_prompt_version, "cycle3a-semantic-v1")
+        self.assertEqual(config.semantic_segmentation_max_unit_chars, 220)
+        self.assertEqual(config.semantic_segmentation_max_unit_duration_ms, 9_000)
+        self.assertEqual(config.semantic_segmentation_min_unit_duration_ms, 800)
+        self.assertEqual(config.semantic_segmentation_max_tokens_per_request, 350)
+        self.assertTrue(config.semantic_segmentation_fallback_to_rules)
+
+    def test_semantic_segmentation_env_values_load(self):
+        config = load_config(
+            cli_args={},
+            env_path=None,
+            environ={
+                "TRANSLATION_PREPROCESS_AUTO_SUBS": "true",
+                "TRANSLATION_SEMANTIC_SEGMENTATION": "true",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MODE": "llm",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MODEL": "semantic-model",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_PROMPT_VERSION": "cycle3a-semantic-v2",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_UNIT_CHARS": "240",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_UNIT_DURATION_MS": "10000",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MIN_UNIT_DURATION_MS": "900",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_TOKENS_PER_REQUEST": "400",
+                "TRANSLATION_SEMANTIC_SEGMENTATION_FALLBACK_TO_RULES": "false",
+            },
+        )
+
+        self.assertTrue(config.semantic_segmentation_enabled)
+        self.assertEqual(config.semantic_segmentation_mode, "llm")
+        self.assertEqual(config.effective_semantic_segmentation_mode, "llm")
+        self.assertEqual(config.semantic_segmentation_model, "semantic-model")
+        self.assertEqual(config.effective_semantic_segmentation_model, "semantic-model")
+        self.assertEqual(config.semantic_segmentation_prompt_version, "cycle3a-semantic-v2")
+        self.assertEqual(config.semantic_segmentation_max_unit_chars, 240)
+        self.assertEqual(config.semantic_segmentation_max_unit_duration_ms, 10000)
+        self.assertEqual(config.semantic_segmentation_min_unit_duration_ms, 900)
+        self.assertEqual(config.semantic_segmentation_max_tokens_per_request, 400)
+        self.assertFalse(config.semantic_segmentation_fallback_to_rules)
+
+    def test_effective_semantic_segmentation_model_falls_back_to_translation_model(self):
+        config = TranslationConfig(model="trans-model")
+
+        self.assertEqual(config.effective_semantic_segmentation_model, "trans-model")
+
+    def test_semantic_segmentation_enabled_without_preprocess_raises(self):
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_enabled requires preprocess_auto_subs"):
+            TranslationConfig(
+                preprocess_auto_subs=False,
+                semantic_segmentation_enabled=True,
+            )
+
+    def test_semantic_segmentation_invalid_mode_when_enabled_raises(self):
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_mode must be one of"):
+            TranslationConfig(
+                preprocess_auto_subs=True,
+                semantic_segmentation_enabled=True,
+                semantic_segmentation_mode="off",
+            )
+
+    def test_semantic_segmentation_numeric_validation(self):
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_max_unit_chars must be greater than 0"):
+            TranslationConfig(semantic_segmentation_max_unit_chars=0)
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_max_unit_duration_ms must be greater than 0"):
+            TranslationConfig(semantic_segmentation_max_unit_duration_ms=0)
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_min_unit_duration_ms must be greater than 0"):
+            TranslationConfig(semantic_segmentation_min_unit_duration_ms=0)
+        with self.assertRaisesRegex(ValueError, "semantic_segmentation_max_tokens_per_request must be greater than 0"):
+            TranslationConfig(semantic_segmentation_max_tokens_per_request=0)
+
+    def test_semantic_segmentation_safe_dict_includes_fields_without_secrets(self):
+        config = TranslationConfig(
+            preprocess_auto_subs=True,
+            semantic_segmentation_enabled=True,
+            semantic_segmentation_mode="hybrid",
+            semantic_segmentation_model="semantic-model",
+        )
+
+        safe = config.to_safe_dict()
+
+        self.assertTrue(safe["semantic_segmentation_enabled"])
+        self.assertEqual(safe["semantic_segmentation_mode"], "hybrid")
+        self.assertEqual(safe["effective_semantic_segmentation_mode"], "hybrid")
+        self.assertEqual(safe["semantic_segmentation_model"], "semantic-model")
+        self.assertEqual(safe["effective_semantic_segmentation_model"], "semantic-model")
+        self.assertEqual(safe["semantic_segmentation_prompt_version"], "cycle3a-semantic-v1")
+        self.assertEqual(safe["semantic_segmentation_max_unit_chars"], 220)
+        self.assertEqual(safe["semantic_segmentation_max_unit_duration_ms"], 9_000)
+        self.assertEqual(safe["semantic_segmentation_min_unit_duration_ms"], 800)
+        self.assertEqual(safe["semantic_segmentation_max_tokens_per_request"], 350)
+        self.assertTrue(safe["semantic_segmentation_fallback_to_rules"])
+        self.assertNotIn("api_key", safe)
+
 
 if __name__ == "__main__":
     unittest.main()
