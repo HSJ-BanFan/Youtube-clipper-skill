@@ -13,6 +13,7 @@ VALID_FAILURE_MODES = {"strict", "partial", "interactive"}
 VALID_OUTPUT_SCHEMA_VERSIONS = {"v1"}
 VALID_BATCHING_STRATEGY_VERSIONS = {"v1"}
 VALID_AUTO_SUB_SOURCE_MODES = {"single_file", "full_vtt_window"}
+VALID_SEMANTIC_SEGMENTATION_MODES = {"hybrid", "llm"}
 TARGET_LANG_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
@@ -59,6 +60,15 @@ ENV_MAPPING = {
     "segment_max_unit_duration_ms": "TRANSLATION_SEGMENT_MAX_UNIT_DURATION_MS",
     "segment_max_source_cues": "TRANSLATION_SEGMENT_MAX_SOURCE_CUES",
     "segment_max_sentences": "TRANSLATION_SEGMENT_MAX_SENTENCES",
+    "semantic_segmentation_enabled": "TRANSLATION_SEMANTIC_SEGMENTATION",
+    "semantic_segmentation_mode": "TRANSLATION_SEMANTIC_SEGMENTATION_MODE",
+    "semantic_segmentation_model": "TRANSLATION_SEMANTIC_SEGMENTATION_MODEL",
+    "semantic_segmentation_prompt_version": "TRANSLATION_SEMANTIC_SEGMENTATION_PROMPT_VERSION",
+    "semantic_segmentation_max_unit_chars": "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_UNIT_CHARS",
+    "semantic_segmentation_max_unit_duration_ms": "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_UNIT_DURATION_MS",
+    "semantic_segmentation_min_unit_duration_ms": "TRANSLATION_SEMANTIC_SEGMENTATION_MIN_UNIT_DURATION_MS",
+    "semantic_segmentation_max_tokens_per_request": "TRANSLATION_SEMANTIC_SEGMENTATION_MAX_TOKENS_PER_REQUEST",
+    "semantic_segmentation_fallback_to_rules": "TRANSLATION_SEMANTIC_SEGMENTATION_FALLBACK_TO_RULES",
 }
 
 
@@ -106,6 +116,15 @@ class TranslationConfig:
     segment_max_unit_duration_ms: int = 7_000
     segment_max_source_cues: int = 5
     segment_max_sentences: int = 2
+    semantic_segmentation_enabled: bool = False
+    semantic_segmentation_mode: str = "hybrid"
+    semantic_segmentation_model: str | None = None
+    semantic_segmentation_prompt_version: str = "cycle3a-semantic-v1"
+    semantic_segmentation_max_unit_chars: int = 220
+    semantic_segmentation_max_unit_duration_ms: int = 9_000
+    semantic_segmentation_min_unit_duration_ms: int = 800
+    semantic_segmentation_max_tokens_per_request: int = 350
+    semantic_segmentation_fallback_to_rules: bool = True
     output_dir: str | None = None
     output_path: str | None = None
     dry_run: bool = False
@@ -118,6 +137,7 @@ class TranslationConfig:
         object.__setattr__(self, "qa_mode", self.qa_mode.strip().lower())
         object.__setattr__(self, "engine_version", self.engine_version.strip().lower())
         object.__setattr__(self, "failure_mode", self.failure_mode.strip().lower())
+        object.__setattr__(self, "semantic_segmentation_mode", self.semantic_segmentation_mode.strip().lower())
         if self.qa_mode == "off":
             object.__setattr__(self, "qa_mode", "none")
         if self.mode not in VALID_MODES:
@@ -195,6 +215,22 @@ class TranslationConfig:
                 raise ValueError("auto_sub_clip_end_ms is required for full_vtt_window")
         if self.output_dir and self.output_path:
             raise ValueError("output_dir and output_path cannot both be set")
+        if not isinstance(self.semantic_segmentation_enabled, bool):
+            raise ValueError("semantic_segmentation_enabled must be a boolean")
+        if self.semantic_segmentation_enabled:
+            if not self.preprocess_auto_subs:
+                raise ValueError("semantic_segmentation_enabled requires preprocess_auto_subs=True")
+            if self.semantic_segmentation_mode not in VALID_SEMANTIC_SEGMENTATION_MODES:
+                valid = ", ".join(sorted(VALID_SEMANTIC_SEGMENTATION_MODES))
+                raise ValueError(f"semantic_segmentation_mode must be one of: {valid}")
+        if self.semantic_segmentation_max_unit_chars <= 0:
+            raise ValueError("semantic_segmentation_max_unit_chars must be greater than 0")
+        if self.semantic_segmentation_max_unit_duration_ms <= 0:
+            raise ValueError("semantic_segmentation_max_unit_duration_ms must be greater than 0")
+        if self.semantic_segmentation_min_unit_duration_ms <= 0:
+            raise ValueError("semantic_segmentation_min_unit_duration_ms must be greater than 0")
+        if self.semantic_segmentation_max_tokens_per_request <= 0:
+            raise ValueError("semantic_segmentation_max_tokens_per_request must be greater than 0")
 
     @property
     def effective_review_model(self) -> str:
@@ -204,6 +240,14 @@ class TranslationConfig:
     def effective_adaptive_concurrency_max(self) -> int:
         configured_max = self.concurrency if self.adaptive_concurrency_max is None else self.adaptive_concurrency_max
         return min(self.concurrency, configured_max)
+
+    @property
+    def effective_semantic_segmentation_model(self) -> str:
+        return self.semantic_segmentation_model or self.model
+
+    @property
+    def effective_semantic_segmentation_mode(self) -> str:
+        return self.semantic_segmentation_mode if self.semantic_segmentation_enabled else "off"
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -249,6 +293,17 @@ class TranslationConfig:
             "segment_max_unit_duration_ms": self.segment_max_unit_duration_ms,
             "segment_max_source_cues": self.segment_max_source_cues,
             "segment_max_sentences": self.segment_max_sentences,
+            "semantic_segmentation_enabled": self.semantic_segmentation_enabled,
+            "semantic_segmentation_mode": self.semantic_segmentation_mode,
+            "effective_semantic_segmentation_mode": self.effective_semantic_segmentation_mode,
+            "semantic_segmentation_model": self.semantic_segmentation_model,
+            "effective_semantic_segmentation_model": self.effective_semantic_segmentation_model,
+            "semantic_segmentation_prompt_version": self.semantic_segmentation_prompt_version,
+            "semantic_segmentation_max_unit_chars": self.semantic_segmentation_max_unit_chars,
+            "semantic_segmentation_max_unit_duration_ms": self.semantic_segmentation_max_unit_duration_ms,
+            "semantic_segmentation_min_unit_duration_ms": self.semantic_segmentation_min_unit_duration_ms,
+            "semantic_segmentation_max_tokens_per_request": self.semantic_segmentation_max_tokens_per_request,
+            "semantic_segmentation_fallback_to_rules": self.semantic_segmentation_fallback_to_rules,
             "output_dir": self.output_dir,
             "output_path": self.output_path,
             "dry_run": self.dry_run,
@@ -326,11 +381,15 @@ def _coerce_value(field_name: str, raw_value: str) -> Any:
             "segment_max_unit_duration_ms",
             "segment_max_source_cues",
             "segment_max_sentences",
+            "semantic_segmentation_max_unit_chars",
+            "semantic_segmentation_max_unit_duration_ms",
+            "semantic_segmentation_min_unit_duration_ms",
+            "semantic_segmentation_max_tokens_per_request",
         }:
             return int(raw_value)
         if field_name == "temperature":
             return float(raw_value)
-        if field_name in {"cache_enabled", "structured_output", "adaptive_concurrency_enabled", "preprocess_auto_subs"}:
+        if field_name in {"cache_enabled", "structured_output", "adaptive_concurrency_enabled", "preprocess_auto_subs", "semantic_segmentation_enabled", "semantic_segmentation_fallback_to_rules"}:
             return _parse_bool(raw_value)
     except ValueError as exc:
         env_name = ENV_MAPPING.get(field_name, field_name)

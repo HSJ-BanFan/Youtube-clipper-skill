@@ -19,14 +19,22 @@ from translation.models import BatchRecord, BatchState, Cue, CueRecord, ErrorTyp
 from translation.prompts import (
     QA_PROMPT_VERSION,
     PROMPT_VERSION,
+    build_semantic_segmentation_prompt,
     build_structured_translation_prompt,
     build_suspicious_qa_prompt,
     build_translation_prompt,
 )
 from translation.provider import OpenAICompatibleProvider, TranslationProvider
 from translation.qa import QACandidate, find_suspicious_translations
-from translation.report import AutoSubSegmentationStats, QAStats, TranslationStats, write_translation_report
-from translation.segmentation import SegmentBoundaryType, SegmentationOptions, SegmentationResult, SegmentUnit, SubtitleSegmentationSource, segment_subtitles
+from translation.report import AutoSubSegmentationStats, QAStats, SemanticSegmentationStats, TranslationStats, write_translation_report
+from translation.segmentation import SegmentBoundaryType, SegmentationOptions, SegmentationResult, SegmentUnit, SegmentationStats, SegmentationWarning, SubtitleSegmentationSource, segment_subtitles
+from translation.semantic_segmentation import (
+    SemanticSegmentationResult,
+    SemanticSegmenterOptions,
+    extract_translation_eligible_tokens,
+    fallback_to_rule_units,
+    refine_units_from_semantic_boundaries,
+)
 from translation.subtitles import (
     detect_subtitle_format,
     format_timestamp,
@@ -136,6 +144,12 @@ _CACHE_ACCESS_LOCK = Lock()
 _INVALID_JSON_MESSAGE = "translation response is not valid JSON"
 SHRINK_BATCH_MAX_SPLIT_ATTEMPTS = 2
 SHRINK_BATCH_STRATEGY_VERSION = "v1"
+
+SEMANTIC_SEGMENTATION_RULE_TRANSLATION_UNITS_ARTIFACT = "rule_translation_units.json"
+SEMANTIC_SEGMENTATION_RULE_CUE_MAP_ARTIFACT = "rule_cue_map.json"
+SEMANTIC_SEGMENTATION_RULE_SEGMENTED_SOURCE_ARTIFACT = "rule_segmented_source.srt"
+SEMANTIC_SEGMENTATION_RULE_REPORT_ARTIFACT = "rule_segmentation_report.md"
+
 SHRINK_ELIGIBLE_ERROR_TYPES = {
     ErrorType.INVALID_JSON,
     ErrorType.SCHEMA_MISMATCH,
@@ -174,6 +188,22 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     if not config.api_key:
         raise ValueError("TRANSLATION_API_KEY is required. Set it as an environment variable or provide it via --env-file.")
 
+    semantic_stats: SemanticSegmentationStats | None = None
+    effective_segmentation_result = prepared_inputs.segmentation_result
+    if prepared_inputs.segmentation_result is not None:
+        semantic_result, semantic_stats = _apply_semantic_segmentation_if_enabled(
+            prepared_inputs.segmentation_result,
+            config,
+            OpenAICompatibleProvider(config),
+        )
+        if semantic_result is not None:
+            effective_segmentation_result = _segmentation_result_with_units(
+                prepared_inputs.segmentation_result,
+                semantic_result.units,
+                semantic_result.warnings,
+            )
+            cues = list(_cues_from_units(semantic_result.units))
+
     glossary = load_glossary(config.glossary_path)
     global_context = build_global_context(cues, input_path, config)
 
@@ -184,6 +214,8 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
             prepared_inputs.segmentation_result,
             translated_segment_unit_count=len(cues),
         )
+        if semantic_stats is not None:
+            stats.semantic_segmentation = semantic_stats
     all_translations: dict[str, str] = {}
 
     batch_results = _run_translation_batches(
@@ -202,8 +234,10 @@ def run_translation_pipeline(subtitle_path: str | Path, config: TranslationConfi
     validate_translations(cues, final_translations)
     write_translated_srt(cues, final_translations, output_paths.translated_srt)
     write_bilingual_srt(cues, final_translations, output_paths.bilingual_srt)
-    if prepared_inputs.segmentation_result is not None:
-        _write_segmentation_artifacts(prepared_inputs.segmentation_result, output_paths.output_dir)
+    if effective_segmentation_result is not None:
+        _write_segmentation_artifacts(effective_segmentation_result, output_paths.output_dir)
+        if effective_segmentation_result is not prepared_inputs.segmentation_result:
+            _write_rule_segmentation_artifacts(prepared_inputs.segmentation_result, output_paths.output_dir)
     write_global_context(global_context, output_paths.global_context)
 
     result = PipelineResult(
@@ -332,6 +366,140 @@ def _write_segmentation_artifacts(segmentation_result: SegmentationResult, outpu
         encoding="utf-8",
     )
     (output_dir / SEGMENTATION_ARTIFACT_REPORT).write_text(segmentation_result.to_report_markdown(), encoding="utf-8")
+
+
+def _write_rule_segmentation_artifacts(rule_result: SegmentationResult, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / SEMANTIC_SEGMENTATION_RULE_SEGMENTED_SOURCE_ARTIFACT).write_text(
+        rule_result.to_segmented_srt_text(), encoding="utf-8"
+    )
+    (output_dir / SEMANTIC_SEGMENTATION_RULE_TRANSLATION_UNITS_ARTIFACT).write_text(
+        json.dumps(rule_result.to_translation_units_payload(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / SEMANTIC_SEGMENTATION_RULE_CUE_MAP_ARTIFACT).write_text(
+        json.dumps(rule_result.to_cue_map_payload(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / SEMANTIC_SEGMENTATION_RULE_REPORT_ARTIFACT).write_text(
+        rule_result.to_report_markdown(), encoding="utf-8"
+    )
+
+
+def _apply_semantic_segmentation_if_enabled(
+    segmentation_result: SegmentationResult,
+    config: TranslationConfig,
+    provider: OpenAICompatibleProvider,
+) -> tuple[SemanticSegmentationResult | None, SemanticSegmentationStats | None]:
+    if not config.semantic_segmentation_enabled:
+        return None, None
+
+    options = SemanticSegmenterOptions(
+        enabled=True,
+        mode=config.semantic_segmentation_mode,
+        max_unit_chars=config.semantic_segmentation_max_unit_chars,
+        max_unit_duration_ms=config.semantic_segmentation_max_unit_duration_ms,
+        min_unit_duration_ms=config.semantic_segmentation_min_unit_duration_ms,
+        max_tokens_per_request=config.semantic_segmentation_max_tokens_per_request,
+        fallback_to_rules=config.semantic_segmentation_fallback_to_rules,
+        model=config.effective_semantic_segmentation_model,
+        prompt_version=config.semantic_segmentation_prompt_version,
+    )
+
+    rule_units = segmentation_result.units
+    eligible_tokens = extract_translation_eligible_tokens(segmentation_result.active_tokens, rule_units)
+
+    stats = SemanticSegmentationStats(
+        enabled=True,
+        mode=options.mode,
+        prompt_version=options.prompt_version,
+        model=options.model,
+        attempted=False,
+        rule_unit_count=len(rule_units),
+        final_unit_count=len(rule_units),
+    )
+
+    if len(eligible_tokens) > options.max_tokens_per_request:
+        if options.fallback_to_rules:
+            fallback = fallback_to_rule_units(rule_units, "too_many_tokens")
+            stats.semantic_fallback_used = True
+            stats.fallback_reason = "too_many_tokens"
+            stats.warning_count = len(fallback.warnings)
+            stats.final_unit_count = len(fallback.units)
+            return fallback, stats
+        raise ValueError("eligible token count exceeded MAX_TOKENS_PER_REQUEST")
+
+    eligible_tokens_count = len(eligible_tokens)
+    stats.attempted = True
+    stats.semantic_provider_calls = 1
+
+    try:
+        prompt = build_semantic_segmentation_prompt(
+            eligible_tokens=eligible_tokens,
+            options=options,
+        )
+        raw_payload = provider.segment_semantically(prompt, model=options.model)
+    except Exception as exc:  # noqa: BLE001
+        stats.semantic_provider_failures = 1
+        if not options.fallback_to_rules:
+            raise
+        fallback = fallback_to_rule_units(rule_units, f"provider_error: {exc}")
+        stats.semantic_fallback_used = True
+        stats.fallback_reason = f"provider_error: {exc}"
+        stats.warning_count = len(fallback.warnings)
+        stats.final_unit_count = len(fallback.units)
+        return fallback, stats
+
+    try:
+        result = refine_units_from_semantic_boundaries(
+            active_tokens=segmentation_result.active_tokens,
+            rule_units=rule_units,
+            raw_payload=raw_payload,
+            options=options,
+            clip_start_ms=segmentation_result.clip_start_ms,
+            clip_end_ms=segmentation_result.clip_end_ms,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not options.fallback_to_rules:
+            raise
+        fallback = fallback_to_rule_units(rule_units, f"refine_error: {exc}")
+        stats.semantic_fallback_used = True
+        stats.fallback_reason = f"refine_error: {exc}"
+        stats.warning_count = len(fallback.warnings)
+        stats.final_unit_count = len(fallback.units)
+        return fallback, stats
+
+    stats.semantic_fallback_used = result.fallback_used
+    stats.fallback_reason = result.fallback_reason
+    stats.warning_count = len(result.warnings)
+    stats.final_unit_count = len(result.units)
+    if not result.fallback_used:
+        stats.semantic_unit_count = len(result.units)
+        stats.translated_semantic_unit_count = sum(
+            1 for unit in result.units if _is_translation_eligible(unit)
+        )
+    _ = eligible_tokens_count
+    return result, stats
+
+
+def _segmentation_result_with_units(
+    base: SegmentationResult,
+    units: tuple[SegmentUnit, ...],
+    extra_warnings: tuple[SegmentationWarning, ...],
+) -> SegmentationResult:
+    new_warnings = base.warnings + tuple(extra_warnings)
+    new_stats = replace(
+        base.stats,
+        translation_unit_count=len(units),
+        padding_only_unit_count=sum(1 for u in units if u.is_padding_only),
+        warning_count=len(new_warnings),
+    )
+    return replace(base, units=units, warnings=new_warnings, stats=new_stats)
+
+
+def _cues_from_units(units: tuple[SegmentUnit, ...]) -> tuple[Cue, ...]:
+    eligible = tuple(unit for unit in units if _is_translation_eligible(unit))
+    return tuple(_segment_unit_to_cue(unit, index) for index, unit in enumerate(eligible, start=1))
 
 
 
